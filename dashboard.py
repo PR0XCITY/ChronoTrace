@@ -250,6 +250,7 @@ def _init():
         "ai_metrics_json":       None,
         "anchored":              False,
         "anchor_result":         None,
+        "current_stage":         "Normal",   # set by run_pipeline; read by AI panel
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -307,6 +308,8 @@ def run_pipeline(mode: str, n_rings: int = 1):
     st.session_state.anchored            = False
     st.session_state.anchor_result       = None
     st.session_state.last_mode           = mode
+    # Single source of truth for stage — set once here, never overwritten by Gemini
+    st.session_state.current_stage       = ring_summary.get("dominant_label", "Normal")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -943,13 +946,16 @@ with ai_left:
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Laundering Stage**")
-            stage_ai = ai_intel.get("laundering_stage", "—")
+            # Always read from session_state — stage_predictor is the single source of truth.
+            # ai_intel['laundering_stage'] is never used here.
+            stage_engine = st.session_state.get("current_stage", "Normal")
             stage_icon = {
                 "Normal": "🟢", "Compromised": "🟡",
                 "Layering": "🟠", "Pre-Cashout": "🔴",
                 "Exit Imminent": "🚨",
-            }.get(stage_ai, "⚪")
-            st.markdown(f"### {stage_icon} {stage_ai}")
+            }.get(stage_engine, "⚪")
+            st.markdown(f"### {stage_icon} {stage_engine}")
+            st.caption("Source: deterministic rule engine")
         with col2:
             st.markdown("**Confidence Level**")
             conf = ai_intel.get("confidence_level", "N/A")

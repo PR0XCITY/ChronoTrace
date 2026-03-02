@@ -111,7 +111,7 @@ def generate_intelligence(metrics_json: dict) -> dict:
 
     prompt = f"""You are an expert Anti-Money Laundering (AML) analyst at a tier-1 financial institution.
 
-Analyse the following transaction network metrics extracted from a real-time graph intelligence system:
+The following transaction network metrics were computed by ChronoTrace's deterministic graph intelligence engine:
 
 ```json
 {json.dumps(metrics_json, indent=2)}
@@ -124,12 +124,20 @@ Metric definitions:
 - avg_hop_time: average minutes between hops in this sub-network
 - predicted_exit_minutes: estimated minutes before funds leave the monitored network
 - compromised_status: whether the origin account is flagged as breached
+- deterministic_stage: laundering stage already classified by the rule engine — use this EXACTLY
+- eta_minutes: same as predicted_exit_minutes, provided for clarity
 
-Based ONLY on these metrics, respond with a JSON object containing exactly these four fields:
+⚠️ CRITICAL INSTRUCTION:
+The field `deterministic_stage` has been computed by a deterministic rule engine and is the authoritative
+classification. You MUST use this exact value in the `laundering_stage` field of your response.
+Do NOT override, reinterpret, or substitute it with your own classification.
+Your role is to provide reasoning and recommended action, not to reclassify the stage.
+
+Based on the metrics above, respond with a JSON object containing exactly these four fields:
 
 {{
-  "laundering_stage": "<one of: Normal | Compromised | Layering | Pre-Cashout | Exit Imminent>",
-  "risk_reasoning": "<2–3 sentence analysis explaining why this stage was assigned and key risk indicators>",
+  "laundering_stage": "{metrics_json.get('deterministic_stage', 'Normal')}",
+  "risk_reasoning": "<2–3 sentence analysis explaining WHY this stage was assigned and key risk indicators observed in the metrics>",
   "recommended_action": "<concrete, specific action for the compliance team to take RIGHT NOW>",
   "confidence_level": "<one of: Low | Moderate | High | Critical>"
 }}
@@ -149,6 +157,13 @@ Respond with ONLY the JSON object. No preamble, no explanation outside the JSON.
             for key in required:
                 if key not in result:
                     result[key] = "Analysis incomplete"
+
+        # ── Enforce single source of truth ────────────────────────────────────
+        # stage_predictor is authoritative; Gemini must not override it.
+        # Overwrite regardless of what Gemini returned.
+        deterministic = metrics_json.get("deterministic_stage")
+        if deterministic:
+            result["laundering_stage"] = deterministic
 
         return result
 
@@ -282,8 +297,9 @@ Total length: 400–600 words."""
 
 def build_metrics_json(pred_df, ring_summary: dict) -> dict:
     """
-    Build the metrics dict that generate_intelligence() expects,
-    from the predictor DataFrame and ring summary.
+    Build the metrics dict that generate_intelligence() expects.
+    Includes the deterministic stage computed by stage_predictor so
+    Gemini never needs to (re)classify it.
     """
     if pred_df is None or pred_df.empty:
         return {
@@ -293,22 +309,30 @@ def build_metrics_json(pred_df, ring_summary: dict) -> dict:
             "avg_hop_time": 0.0,
             "predicted_exit_minutes": -1,
             "compromised_status": False,
+            "deterministic_stage": "Normal",
+            "eta_minutes": -1,
         }
 
     top = pred_df.iloc[0]
-    hops = int(top.get("hops_to_cashout", -1))
-    burst = float(top.get("burst_score", 0))
+    hops     = int(top.get("hops_to_cashout", -1))
+    burst    = float(top.get("burst_score", 0))
     avg_hop_time = round((1.0 - burst) * 30, 1)  # heuristic
 
     ttc = ring_summary.get("min_time_to_cashout", -1)
+
+    # Deterministic stage comes from stage_predictor, never from Gemini
+    deterministic_stage = ring_summary.get("dominant_label", "Normal")
+    eta_minutes = round(ttc, 1) if ttc >= 0 else -1
 
     return {
         "hop_count":               hops,
         "fan_out":                 round(float(top.get("fan_out_ratio", 0)), 3),
         "burst_score":             round(burst, 3),
         "avg_hop_time":            avg_hop_time,
-        "predicted_exit_minutes":  round(ttc, 1) if ttc >= 0 else -1,
+        "predicted_exit_minutes":  eta_minutes,
         "compromised_status":      ring_summary.get("max_stage", 0) >= 1,
+        "deterministic_stage":     deterministic_stage,   # ← single source of truth
+        "eta_minutes":             eta_minutes,
     }
 
 
