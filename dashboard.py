@@ -328,6 +328,8 @@ with st.sidebar:
     # ── Dataset-backed run (primary for demo / Streamlit Cloud) ────────
     st.caption("🗂️ Dataset-Backed Analysis")
     if st.button("📊 Load transactions.csv", use_container_width=True, key="btn_dataset"):
+        # Invalidate dataset cache so the CSV is re-read and graph rebuilt
+        dataset_loader.invalidate_cache()
         run_pipeline(mode="dataset")
         st.rerun()
 
@@ -1133,23 +1135,34 @@ st.markdown("""
 <div class="sec-hdr"><span class="sec-dot"></span>IMMUTABLE AUDIT ANCHOR — BLOCKCHAIN PROOF OF DETECTION</div>
 """, unsafe_allow_html=True)
 
-_anchor_top_row = ring_summary
-_top_dna_score  = float(pred_df["dna_score"].max()) if not pred_df.empty else 0.0
-_top_stage      = ring_summary.get("max_stage_label", "Normal")
-_pqc_status     = "Quantum Vulnerable" if _top_stage in ("Pre-Cashout", "Exit Imminent") else "Quantum Safe"
+_top_dna_score = float(pred_df["dna_score"].max()) if not pred_df.empty else 0.0
+
+# Fix: 'dominant_label' is the correct key (not 'max_stage_label')
+_top_stage     = ring_summary.get("dominant_label",
+                    ring_summary.get("max_stage_label", "Normal"))
+
+# Dynamic PQC: driven by DNA score and stage, never hardcoded
+if _top_dna_score >= 25 or _top_stage in ("Pre-Cashout", "Exit Imminent"):
+    _pqc_status = "Quantum Vulnerable"
+elif _top_stage in ("Layering", "Compromised"):
+    _pqc_status = "PQC Ready"
+else:
+    _pqc_status = "Quantum Safe"
 
 _anch_left, _anch_right = st.columns([1.6, 1], gap="medium")
 
 with _anch_left:
-    st.caption(
-        f"🔒 PQC Status: **{_pqc_status}**  ·  "
-        f"Top DNA: **{_top_dna_score:.1f}**  ·  "
-        f"Stage: **{_top_stage}**"
-    )
-
+    # Live debug row — shows all three anchor conditions at a glance
     eligible = blockchain_layer.should_anchor(
         _top_dna_score, _top_stage, _pqc_status
     )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Top DNA Score", f"{_top_dna_score:.1f}",
+              delta="≥ 25 needed", delta_color="normal" if _top_dna_score >= 25 else "inverse")
+    c2.metric("Stage", _top_stage)
+    c3.metric("PQC Status", _pqc_status)
+    c4.metric("Anchor Eligible", "✔ Yes" if eligible else "✘ No",
+              delta_color="normal" if eligible else "inverse")
 
     if not st.session_state.anchored:
         if eligible:

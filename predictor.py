@@ -71,12 +71,12 @@ def classify_stage(row: pd.Series) -> int:
     """
     Classify a node's laundering stage using its DNA metrics.
 
-    Rule priority (highest to lowest):
-      Stage 4 → hop_proximity ≈ 1 AND dna_score ≥ 80
-      Stage 3 → dna_score ≥ 65 AND burst_score ≥ 0.5 AND hops ≤ 3
-      Stage 2 → dna_score ≥ 45 AND velocity_score ≥ 0.3
-      Stage 1 → dna_score ≥ 25 AND fan_out_ratio > 1
-      Stage 0 → default
+    Thresholds tuned for real-dataset DNA ranges (typical max 35–50):
+      Stage 4 (Exit Imminent) → hop_proximity ≈ 1  AND dna_score ≥ 35
+      Stage 3 (Pre-Cashout)   → dna_score ≥ 28  AND burst ≥ 0.3  AND hops ≤ 4
+      Stage 2 (Layering)      → dna_score ≥ 20  AND velocity ≥ 0.2
+      Stage 1 (Compromised)   → dna_score ≥ 12  AND fan_out > 1
+      Stage 0 (Normal)        → default
     """
     dna       = row.get("dna_score", 0)
     burst     = row.get("burst_score", 0)
@@ -84,15 +84,14 @@ def classify_stage(row: pd.Series) -> int:
     hop_prox  = row.get("hop_proximity", 0)
     hops      = row.get("hops_to_cashout", -1)
     fan_out   = row.get("fan_out_ratio", 0)
-    circular  = row.get("circularity", 0)
 
-    if hop_prox >= 0.9 and dna >= 75:
+    if hop_prox >= 0.9 and dna >= 35:
         return 4
-    if dna >= 60 and burst >= 0.45 and (hops != -1 and hops <= 3):
+    if dna >= 28 and burst >= 0.3 and (hops != -1 and hops <= 4):
         return 3
-    if dna >= 40 and velocity >= 0.25:
+    if dna >= 20 and velocity >= 0.2:
         return 2
-    if dna >= 20 and fan_out > 1.0:
+    if dna >= 12 and fan_out > 1.0:
         return 1
     return 0
 
