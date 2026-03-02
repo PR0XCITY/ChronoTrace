@@ -1,0 +1,301 @@
+"""
+gemini_layer.py — ChronoTrace AI Intelligence Layer
+Integrates Google Gemini via google-generativeai SDK.
+
+Authentication priority:
+  1. Environment variable GEMINI_API_KEY
+  2. st.secrets["GEMINI_API_KEY"]
+  3. Graceful fallback (returns placeholder data if key unavailable)
+"""
+
+import json
+import os
+import re
+from typing import Optional
+
+# ── Lazy import Streamlit secrets so this module works outside Streamlit too ─
+def _get_api_key() -> Optional[str]:
+    """Resolve API key from env → st.secrets → None."""
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        return key
+    try:
+        import streamlit as st
+        return st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        return None
+
+
+from google import genai
+
+_client = None
+
+def _get_client():
+    global _client
+    if _client:
+        return _client
+
+    api_key = _get_api_key()
+    if not api_key:
+        return None
+
+    try:
+        _client = genai.Client(api_key=api_key)
+        return _client
+    except Exception:
+        return None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# HELPER — safe JSON extraction from model response
+# ────────────────────────────────────────────────────────────────────────────
+
+def _extract_json(text: str) -> dict:
+    """
+    Attempt to extract a JSON object from the model's text response.
+    Falls back to a partial parse or empty dict on failure.
+    """
+    # Try direct parse first
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find a JSON block (```json ... ```)
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find raw JSON object
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return {}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A) GENERATE_INTELLIGENCE
+# ────────────────────────────────────────────────────────────────────────────
+
+_INTELLIGENCE_FALLBACK = {
+    "laundering_stage":   "API key not configured",
+    "risk_reasoning":     "Configure GEMINI_API_KEY to enable AI analysis.",
+    "recommended_action": "Set GEMINI_API_KEY in environment or st.secrets.",
+    "confidence_level":   "N/A",
+}
+
+
+def generate_intelligence(metrics_json: dict) -> dict:
+    """
+    Send structured transaction metrics to Gemini and receive AML intelligence.
+
+    Args:
+        metrics_json: dict with keys:
+            hop_count, fan_out, burst_score, avg_hop_time,
+            predicted_exit_minutes, compromised_status
+
+    Returns:
+        dict with keys:
+            laundering_stage, risk_reasoning, recommended_action, confidence_level
+    """
+    model = _get_client()
+    if model is None:
+        return _INTELLIGENCE_FALLBACK.copy()
+
+    prompt = f"""You are an expert Anti-Money Laundering (AML) analyst at a tier-1 financial institution.
+
+Analyse the following transaction network metrics extracted from a real-time graph intelligence system:
+
+```json
+{json.dumps(metrics_json, indent=2)}
+```
+
+Metric definitions:
+- hop_count: number of hops from origin to nearest cashout node (-1 = unreachable)
+- fan_out: out-degree / in-degree ratio (high values = rapid redistribution)
+- burst_score: velocity anomaly index 0–1 (>0.6 = suspicious rapid-fire transfers)
+- avg_hop_time: average minutes between hops in this sub-network
+- predicted_exit_minutes: estimated minutes before funds leave the monitored network
+- compromised_status: whether the origin account is flagged as breached
+
+Based ONLY on these metrics, respond with a JSON object containing exactly these four fields:
+
+{{
+  "laundering_stage": "<one of: Normal | Compromised | Layering | Pre-Cashout | Exit Imminent>",
+  "risk_reasoning": "<2–3 sentence analysis explaining why this stage was assigned and key risk indicators>",
+  "recommended_action": "<concrete, specific action for the compliance team to take RIGHT NOW>",
+  "confidence_level": "<one of: Low | Moderate | High | Critical>"
+}}
+
+Respond with ONLY the JSON object. No preamble, no explanation outside the JSON."""
+
+    try:
+        response = _client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        result = _extract_json(response.text)
+
+        # Validate required keys
+        required = {"laundering_stage", "risk_reasoning", "recommended_action", "confidence_level"}
+        if not required.issubset(result.keys()):
+            # Fill any missing keys
+            for key in required:
+                if key not in result:
+                    result[key] = "Analysis incomplete"
+
+        return result
+
+    except Exception as e:
+        return {
+            "laundering_stage":   "Error",
+            "risk_reasoning":     f"Gemini API call failed: {str(e)[:120]}",
+            "recommended_action": "Check API key validity and quota.",
+            "confidence_level":   "N/A",
+        }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# B) GENERATE_INVESTIGATION_REPORT
+# ────────────────────────────────────────────────────────────────────────────
+
+def generate_investigation_report(summary_json: dict) -> str:
+    """
+    Generate a formatted AML investigation summary narrative using Gemini.
+
+    Args:
+        summary_json: dict with keys:
+            accounts_involved, timeline_summary, estimated_loss
+
+    Returns:
+        Formatted AML investigation report as plain text.
+    """
+    model = _get_client()
+    if model is None:
+        return (
+            "⚠️ GEMINI_API_KEY not configured.\n\n"
+            "To enable AI-generated investigation reports:\n"
+            "  • Set the GEMINI_API_KEY environment variable, OR\n"
+            "  • Add it to .streamlit/secrets.toml as: GEMINI_API_KEY = \"your-key\"\n\n"
+            "Investigation data summary:\n"
+            f"  Accounts involved : {summary_json.get('accounts_involved', 'N/A')}\n"
+            f"  Timeline          : {summary_json.get('timeline_summary', 'N/A')}\n"
+            f"  Estimated loss    : ${summary_json.get('estimated_loss', 0):,.2f}"
+        )
+
+    prompt = f"""You are a Suspicious Activity Report (SAR) author at a financial intelligence unit.
+
+Based on the following case summary data, draft a professional AML investigation report:
+
+```json
+{json.dumps(summary_json, indent=2)}
+```
+
+The report must include these sections:
+
+1. CASE SUMMARY
+   - Brief executive description of the detected financial crime pattern
+   - Key risk indicators identified
+
+2. TRANSACTION TIMELINE
+   - Narrative description of how funds moved through the network
+   - Estimated duration of the laundering operation
+
+3. ACCOUNTS INVOLVED
+   - Description of the roles (origin, mule accounts, cashout destination)
+   - Estimated number of accounts compromised
+
+4. FINANCIAL IMPACT
+   - Estimated total funds at risk
+   - Breakdown of what stage the funds are at
+
+5. RECOMMENDED ACTIONS
+   - Immediate steps (account freezes, notifications)
+   - Medium-term steps (law enforcement referral, asset recovery)
+   - Compliance obligations (SAR filing deadlines)
+
+6. RISK CLASSIFICATION
+   - Overall risk rating (Critical / High / Medium / Low)
+   - Urgency score (1–10 with justification)
+
+Write in professional regulatory language. Be specific and actionable.
+Total length: 400–600 words."""
+
+    try:
+        client = _get_client()
+        if client is None:
+            return "❌ Client unavailable. Check GEMINI_API_KEY."
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as e:
+        return f"❌ Report generation failed: {str(e)}\n\nPlease check your Gemini API key and quota."
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# UTILITY — Build metrics_json from predictor + session data
+# ────────────────────────────────────────────────────────────────────────────
+
+def build_metrics_json(pred_df, ring_summary: dict) -> dict:
+    """
+    Build the metrics dict that generate_intelligence() expects,
+    from the predictor DataFrame and ring summary.
+    """
+    if pred_df is None or pred_df.empty:
+        return {
+            "hop_count": -1,
+            "fan_out": 0.0,
+            "burst_score": 0.0,
+            "avg_hop_time": 0.0,
+            "predicted_exit_minutes": -1,
+            "compromised_status": False,
+        }
+
+    top = pred_df.iloc[0]
+    hops = int(top.get("hops_to_cashout", -1))
+    burst = float(top.get("burst_score", 0))
+    avg_hop_time = round((1.0 - burst) * 30, 1)  # heuristic
+
+    ttc = ring_summary.get("min_time_to_cashout", -1)
+
+    return {
+        "hop_count":               hops,
+        "fan_out":                 round(float(top.get("fan_out_ratio", 0)), 3),
+        "burst_score":             round(burst, 3),
+        "avg_hop_time":            avg_hop_time,
+        "predicted_exit_minutes":  round(ttc, 1) if ttc >= 0 else -1,
+        "compromised_status":      ring_summary.get("max_stage", 0) >= 1,
+    }
+
+
+def build_summary_json(ring_summary: dict, transactions_df, ring_accounts: list) -> dict:
+    """Build the summary dict that generate_investigation_report() expects."""
+    n_accounts = len(ring_accounts)
+
+    # Build a crude timeline from ring_summary stage
+    stage = ring_summary.get("dominant_label", "Unknown")
+    ttc = ring_summary.get("min_time_to_cashout", -1)
+    timeline = f"Funds currently in '{stage}' phase. "
+    if ttc > 0:
+        timeline += f"Estimated {ttc:.0f} minutes until cashout."
+    elif ttc == 0:
+        timeline += "Cashout appears to be in progress or completed."
+
+    estimated_loss = ring_summary.get("estimated_loss_usd", 0.0)
+
+    return {
+        "accounts_involved": n_accounts,
+        "timeline_summary":  timeline,
+        "estimated_loss":    round(estimated_loss, 2),
+        "laundering_stage":  stage,
+        "max_dna_score":     ring_summary.get("max_cashout_probability", 0),
+    }
