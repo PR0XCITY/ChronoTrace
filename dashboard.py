@@ -971,38 +971,47 @@ with _rd_col:
             f"increase exit probability."
         )
 
-        bars_html = ""
+        # Build individual bar divs as plain strings (no outer f-string nesting)
+        bar_divs = []
         for fname, fval, fclr in _factors_sorted:
             pct = min(float(fval), 1.0) * 100
-            bars_html += f"""
-            <div style='margin-bottom:.45rem;'>
-                <div style='display:flex;justify-content:space-between;font-size:.65rem;
-                            margin-bottom:.15rem;color:#64748b;'>
-                    <span>{fname}</span>
-                    <span style='color:#e2e8f0;font-family:monospace;'>{fval:.3f}</span>
-                </div>
-                <div style='background:#1a2744;border-radius:2px;height:4px;'>
-                    <div style='width:{pct:.0f}%;height:4px;border-radius:2px;
-                                background:linear-gradient(90deg,{fclr},transparent);'></div>
-                </div>
-            </div>"""
+            bar_divs.append(
+                "<div style='margin-bottom:.5rem;'>"
+                "<div style='display:flex;justify-content:space-between;"
+                "font-size:.65rem;margin-bottom:.18rem;color:#64748b;'>"
+                f"<span>{fname}</span>"
+                f"<span style='color:#e2e8f0;font-family:monospace;'>{fval:.3f}</span>"
+                "</div>"
+                "<div style='background:#1a2744;border-radius:2px;height:4px;'>"
+                f"<div style='width:{int(pct)}%;height:4px;border-radius:2px;"
+                f"background:linear-gradient(90deg,{fclr},transparent);'>"
+                "</div></div></div>"
+            )
+        bars_joined = "".join(bar_divs)
 
-        st.markdown(f"""
-        <div style='background:#080f1e;border:1px solid #1a2744;border-radius:10px;
-                    padding:.7rem .9rem;height:100%;'>
-            <div class='sec-hdr' style='margin-bottom:.6rem;'>
-                <span class='sec-dot'></span>RISK DRIVERS
-            </div>
-            {bars_html}
-            <div style='font-size:.63rem;color:#475569;margin-top:.5rem;
-                        line-height:1.6;font-style:italic;border-top:1px solid #1a2744;
-                        padding-top:.4rem;'>{_narrative}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_html = (
+            "<div style='background:#080f1e;border:1px solid #1a2744;"
+            "border-radius:10px;padding:.7rem .9rem;'>"
+            "<div style='font-size:.58rem;color:#475569;text-transform:uppercase;"
+            "letter-spacing:.1em;margin-bottom:.65rem;display:flex;align-items:center;"
+            "gap:.4rem;border-bottom:1px solid #1a2744;padding-bottom:.45rem;'>"
+            "<span style='width:5px;height:5px;border-radius:50%;"
+            "background:#3b82f6;display:inline-block;'></span>"
+            "RISK DRIVERS</div>"
+            + bars_joined +
+            "<div style='font-size:.63rem;color:#475569;margin-top:.5rem;"
+            "line-height:1.6;font-style:italic;border-top:1px solid #1a2744;"
+            f"padding-top:.4rem;'>{_narrative}</div>"
+            "</div>"
+        )
+
+        with st.container():
+            st.markdown(card_html, unsafe_allow_html=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # NETWORK GRAPH + ALERT FEED
-# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# ─────────────────────────────────────────────────────────────────────────────
 
 graph_col, alert_col = st.columns([3, 1.15], gap="medium")
 
