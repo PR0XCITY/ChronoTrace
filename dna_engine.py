@@ -118,13 +118,16 @@ def _compute_burst_score(G: nx.DiGraph, node: str, tx_df: pd.DataFrame) -> float
 def _compute_hop_count(G: nx.DiGraph, node: str, cashout_nodes: list) -> int:
     """
     Estimate shortest hop count from this node to any known cashout node.
-    Returns -1 if no path exists.
+    Returns -1 if no path exists or cashout_nodes is empty.
     """
     if not cashout_nodes:
         return -1
 
     min_hops = float("inf")
     for co in cashout_nodes:
+        # Skip cashout node if it is not present in this graph
+        if co not in G or node not in G:
+            continue
         if nx.has_path(G, node, co):
             try:
                 path_len = nx.shortest_path_length(G, node, co)
@@ -332,7 +335,11 @@ def analyse(sim_result: dict) -> dict:
     transactions  = sim_result["transactions"]
     cashout_nodes = sim_result["cashout_nodes"]
 
-    G        = build_graph(transactions)
+    G = build_graph(transactions)
+
+    # Filter to only nodes that exist in this graph (dataset-derived nodes
+    # may reference accounts absent from the built graph after edge merging)
+    cashout_nodes = [n for n in cashout_nodes if n in G]
     dna_df   = compute_dna_scores(G, transactions, cashout_nodes)
     clusters = detect_suspicious_clusters(G, dna_df)
     layout   = compute_layout(G)
