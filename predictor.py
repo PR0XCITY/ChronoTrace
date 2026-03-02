@@ -111,7 +111,13 @@ def estimate_time_to_cashout(row: pd.Series, stage: int) -> float:
     if stage == 0:
         return -1.0
     if stage == 4:
+<<<<<<< HEAD
         return 0.0
+=======
+        # Stage 4 = Exit Imminent: cashout is underway but not yet complete.
+        # Use a short 3–8 minute countdown window so the timer is live, not instantly "DONE".
+        return round(np.random.uniform(3.0, 8.0), 1)
+>>>>>>> 4c569e3 (ABC)
 
     hops = row.get("hops_to_cashout", -1)
     velocity = row.get("velocity_score", 0.3)
@@ -130,7 +136,11 @@ def estimate_time_to_cashout(row: pd.Series, stage: int) -> float:
 
     # Add jitter for realism
     jitter = np.random.uniform(-estimated * 0.1, estimated * 0.1)
+<<<<<<< HEAD
     estimated = max(1.0, estimated + jitter)
+=======
+    estimated = max(2.0, estimated + jitter)
+>>>>>>> 4c569e3 (ABC)
 
     return round(estimated, 1)
 

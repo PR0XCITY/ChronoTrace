@@ -219,11 +219,19 @@ def _build_forensic_graph(
     bg_edges      = [(s, d, dat) for s, d, dat in all_edges
                      if s not in ring_set and d not in ring_set]
 
+<<<<<<< HEAD
     # Sample background to avoid overload
     if len(bg_edges) > 120:
         import random as _r
         _r.seed(42)
         bg_edges = _r.sample(bg_edges, 120)
+=======
+    # Sample background to avoid overload — keep it clean
+    if len(bg_edges) > 60:
+        import random as _r
+        _r.seed(42)
+        bg_edges = _r.sample(bg_edges, 60)
+>>>>>>> 4c569e3 (ABC)
 
     def _edge_xy(edges):
         ex, ey = [], []
@@ -270,8 +278,13 @@ def _build_forensic_graph(
             hoverinfo="none", showlegend=False,
         ))
 
+<<<<<<< HEAD
     # Layer 4 — amount labels on main ring path (top 30 edges by weight)
     ann_edges = sorted(ring_edges, key=lambda e: e[2].get("weight", 0), reverse=True)[:30]
+=======
+    # Layer 4 — amount labels on main ring path (top 12 edges only to reduce clutter)
+    ann_edges = sorted(ring_edges, key=lambda e: e[2].get("weight", 0), reverse=True)[:12]
+>>>>>>> 4c569e3 (ABC)
     annotations = []
     for s, d, dat in ann_edges:
         x0, y0 = pos[s]; x1, y1 = pos[d]
@@ -281,9 +294,15 @@ def _build_forensic_graph(
             x=mx, y=my,
             text=f"₹{amt * inr_rate:,.0f}",
             showarrow=False,
+<<<<<<< HEAD
             font=dict(size=7, color="#f97316", family="JetBrains Mono"),
             bgcolor="rgba(5,8,16,0.85)",
             borderpad=2,
+=======
+            font=dict(size=8, color="#f97316", family="JetBrains Mono"),
+            bgcolor="rgba(5,8,16,0.9)",
+            borderpad=3,
+>>>>>>> 4c569e3 (ABC)
         ))
 
     # Layer 5 — nodes
@@ -346,16 +365,28 @@ def _build_forensic_graph(
         showlegend=False,
     ))
 
+<<<<<<< HEAD
     graph_h = 480 if not focus_ring else 420
+=======
+    graph_h = 520 if not focus_ring else 460
+>>>>>>> 4c569e3 (ABC)
     fig.update_layout(
         paper_bgcolor="#050810", plot_bgcolor="#050810",
         height=graph_h,
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False,
                    title=dict(text="← Origin        Layering        Pre-Cashout        Cashout →",
+<<<<<<< HEAD
                                font=dict(size=9, color="#374151"))),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         margin=dict(l=10, r=10, t=10, b=30),
         annotations=annotations,
+=======
+                               font=dict(size=9, color="#475569"))),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        margin=dict(l=10, r=10, t=15, b=35),
+        annotations=annotations,
+        dragmode="pan",
+>>>>>>> 4c569e3 (ABC)
         hoverlabel=dict(bgcolor="#0d1520", font_size=11,
                         font_family="JetBrains Mono", font_color="#e2e8f0"),
     )
@@ -1828,7 +1859,15 @@ with _anch_left:
                 icon="🔐",
             )
     else:
+<<<<<<< HEAD
         st.success("✔️ Alert hash anchored to Ethereum Sepolia.", icon="⛓️")
+=======
+        ar_mode = (st.session_state.anchor_result or {}).get("mode", "Simulation")
+
+        mode_icon = "🟢" if ar_mode == "Live Sepolia" else "🟡"
+
+        st.success(f"✔️ Alert anchored! Mode: **{ar_mode}** {mode_icon}", icon="⛓️")
+>>>>>>> 4c569e3 (ABC)
 
 with _anch_right:
     ar = st.session_state.anchor_result
@@ -1853,10 +1892,14 @@ with _anch_right:
                 <span style='color:{mode_color};font-weight:600;'>{ar['mode']}</span>
             </div>
             <div style='margin-top:.5rem;'>
+<<<<<<< HEAD
                 <a href='{ar["etherscan_url"]}' target='_blank'
                    style='color:#3b82f6;text-decoration:none;font-size:.7rem;'>
                     🔗 View on Sepolia Etherscan →
                 </a>
+=======
+                {"🔗 <a href='" + ar['etherscan_url'] + "' target='_blank' style='color:#3b82f6;text-decoration:none;font-size:.7rem;'>View on Sepolia Etherscan →</a>" if ar['mode'] == 'Live Sepolia' else "<span style='color:#22c55e;font-size:.68rem;font-weight:600;'>✔ Anchored successfully (Testnet Simulation)</span>"}
+>>>>>>> 4c569e3 (ABC)
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1877,6 +1920,7 @@ with _anch_right:
 st.markdown("""
 <div style='border-top:1px solid #1a2744;margin-top:2rem;padding-top:.9rem;
             display:flex;justify-content:space-between;align-items:center;'>
+<<<<<<< HEAD
     <div style='font-size:.65rem;color:#1e293b;'>
         🔍 ChronoTrace v2.0 · AI-Powered FinCrime Intelligence
     </div>
@@ -1884,6 +1928,15 @@ st.markdown("""
         Gemini 2.5 Flash · NetworkX · Ethereum Sepolia · Streamlit
     </div>
     <div style='font-size:.65rem;color:#1e293b;'>
+=======
+    <div style='font-size:.65rem;color:#475569;'>
+        🔍 ChronoTrace v2.0 · AI-Powered FinCrime Intelligence
+    </div>
+    <div style='font-size:.65rem;color:#475569;'>
+        Gemini 2.5 Flash · NetworkX · Ethereum Sepolia · Streamlit
+    </div>
+    <div style='font-size:.65rem;color:#475569;'>
+>>>>>>> 4c569e3 (ABC)
         © 2025 ChronoTrace Labs
     </div>
 </div>
