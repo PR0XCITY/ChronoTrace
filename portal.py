@@ -17,19 +17,19 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ── Internal modules ─────────────────────────────────────────────────────────
-import dna_engine
-import gnn_layer
-import intervention_engine
-import blockchain_layer
-import dataset_loader
-import gemini_layer
-import alerts as alert_engine
-import stage_predictor
-import graph_engine
-import simulator
 import database as db
+import simulator
+import graph_engine
+import stage_predictor
+import alerts as alert_engine
+import gemini_layer
 import re
 import streamlit.components.v1 as components
+import dataset_loader
+import blockchain_layer
+import intervention_engine
+import gnn_layer
+import dna_engine
 
 # ── Currency ──────────────────────────────────────────────────────────────────
 INR_RATE = 83  # 1 USD = 83 INR
@@ -1106,7 +1106,7 @@ with graph_col:
             st.session_state[layout_key] = _hierarchical_layout(G, ring_accounts, cashout_nodes)
         hier_pos = st.session_state[layout_key]
     else:
-        hier_pos = {} # Default empty if G is None
+        hier_pos = {} # Default empty if no graph
 
     # Phase 5: focus toggle
     focus_opts = ["\U0001f50d Focus: Suspicious Ring", "\U0001f310 Show Full Network"]
@@ -1147,28 +1147,27 @@ with graph_col:
             if st.button("🔥 RUN GRAPH INTELLIGENCE ANALYSIS", use_container_width=True, type="primary", key="btn_run_intel_tab"):
                 compute_intelligence()
                 st.rerun()
+        elif G and analysis:
+            fig_intel = _build_forensic_graph(
+                G            = G,
+                pos          = hier_pos,
+                ring_accounts= ring_accounts,
+                cashout_nodes= cashout_nodes,
+                dna_lookup   = dna_lookup,
+                stage_lookup = stage_lookup_g,
+                hop_lookup   = hop_lookup,
+                inr_rate     = INR_RATE,
+                focus_ring   = focus_ring_mode,
+                intelligence_mode = True
+            )
+            st.plotly_chart(fig_intel, use_container_width=True, config={"displayModeBar": False}, key="fig_intel")
         else:
-            if G:
-                fig_intel = _build_forensic_graph(
-                    G            = G,
-                    pos          = hier_pos,
-                    ring_accounts= ring_accounts,
-                    cashout_nodes= cashout_nodes,
-                    dna_lookup   = dna_lookup,
-                    stage_lookup = stage_lookup_g,
-                    hop_lookup   = hop_lookup,
-                    inr_rate     = INR_RATE,
-                    focus_ring   = focus_ring_mode,
-                    intelligence_mode = True
-                )
-                st.plotly_chart(fig_intel, use_container_width=True, config={"displayModeBar": False}, key="fig_intel")
-            else:
-                st.info("No graph data available for intelligence display.")
+            st.info("No graph data or analysis available for intelligence view.")
 
     with tab3:
         if not intelligence_mode:
              st.warning("⚠️ Intelligence analysis must be run before applying interventions.", icon="🔒")
-        else:
+        elif G and analysis:
             _int_col1, _int_col2 = st.columns([2, 1])
             with _int_col1:
                 st.caption("🛡️ ACTIVE MITIGATION CONTROLS")
@@ -1223,6 +1222,8 @@ with graph_col:
                 st.info(f"Nodes: {len(i_stats['frozen_nodes'])} Frozen (High Risk), {len(i_stats['kyc_nodes'])} KYC Required (Medium Risk)")
             else:
                 st.info("Select an intervention strategy above to visualize the post-mitigation state.")
+        else:
+            st.info("No graph data or analysis available for intervention view.")
         st.markdown("""
         <div style='display:flex;gap:1.6rem;font-size:.67rem;color:#475569;margin-top:-.5rem;
                     flex-wrap:wrap;'>
