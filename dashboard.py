@@ -9,7 +9,7 @@ Requires GEMINI_API_KEY in environment or .streamlit/secrets.toml
 
 import json
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -624,7 +624,7 @@ def run_pipeline(mode: str, n_rings: int = 1):
 
         ttc = ring_summary.get("min_time_to_cashout", -1)
         predicted_exit_ts = (
-            datetime.now() + timedelta(minutes=ttc) if ttc >= 0 else None
+            datetime.now(timezone.utc) + timedelta(minutes=ttc) if ttc >= 0 else None
         )
 
         metrics_json = gemini_layer.build_metrics_json(pred_df, ring_summary)
@@ -794,7 +794,7 @@ with st.sidebar:
 # HEADER — Executive Summary Bar  (Phase 7)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_now_str = datetime.now().strftime("%d %b %Y  %H:%M IST")
+_now_str = datetime.now(timezone.utc).strftime("%d %b %Y  %H:%M UTC")
 _raw_mode = st.session_state.get("last_mode")
 _mode_lbl = _raw_mode.upper() if isinstance(_raw_mode, str) and _raw_mode.strip() else "STANDBY"
 _mode_color = "#ef4444" if _mode_lbl == "ATTACK" else "#f97316" if _mode_lbl == "DATASET" else "#3b82f6"
@@ -890,7 +890,7 @@ def _kpi(col, label, value, sub, color_key, gradient):
 # Dynamic countdown for KPI
 predicted_exit_ts = st.session_state.predicted_exit_ts
 if predicted_exit_ts:
-    remaining = (predicted_exit_ts - datetime.now()).total_seconds() / 60
+    remaining = (predicted_exit_ts - datetime.now(timezone.utc)).total_seconds() / 60
     ttc_display = f"{max(remaining, 0):.0f}m" if remaining > 0 else "DONE"
 else:
     ttc_display, remaining = "N/A", -1
@@ -1135,7 +1135,7 @@ with cd_col:
                 unsafe_allow_html=True)
 
     if predicted_exit_ts and remaining > 0:
-        exit_iso = predicted_exit_ts.strftime("%Y-%m-%dT%H:%M:%S")
+        exit_ts_ms = int(predicted_exit_ts.timestamp() * 1000)
         countdown_html = f"""<!DOCTYPE html><html><head>
 <style>
   body{{margin:0;padding:0;background:transparent;}}
@@ -1157,7 +1157,7 @@ with cd_col:
   <div class="sub" id="cs">minutes · seconds</div>
 </div>
 <script>
-  var T=new Date("{exit_iso}").getTime();
+  var T={exit_ts_ms};
   function tick(){{
     var d=T-Date.now(),el=document.getElementById("cd"),sl=document.getElementById("cs");
     if(!el){{setTimeout(tick,200);return;}}
