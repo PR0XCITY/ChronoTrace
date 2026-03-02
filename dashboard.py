@@ -88,6 +88,281 @@ def _parse_report(report_text: str) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FORENSIC GRAPH HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+import networkx as nx
+
+def _hierarchical_layout(
+    G: "nx.DiGraph",
+    ring_accounts: list,
+    cashout_nodes: list,
+) -> dict:
+    """
+    Assign left-to-right x positions by node role:
+        Column 0  — Origin (high in-degree from normal, high out-degree to ring)
+        Column 1  — Layer-1 mules (direct successors of origin)
+        Column 2  — Layer-2 mules (successors of L1)
+        Column 3  — Pre-cashout aggregators
+        Column 4  — Cashout sinks
+        Column 5  — All other (normal) nodes
+
+    Y positions are spread evenly within each column with a small jitter.
+    Returns dict {node: (x, y)}.
+    """
+    import random as _rnd
+    _rnd.seed(7)  # deterministic jitter
+
+    ring_set    = set(ring_accounts)
+    cashout_set = set(cashout_nodes)
+
+    # Identify origin: ring node with no in-edges from other ring nodes
+    origin_set = set()
+    for n in ring_set:
+        if n in G and not any(p in ring_set for p in G.predecessors(n)):
+            origin_set.add(n)
+    if not origin_set and ring_set:
+        # Fallback: highest out-degree ring node
+        origin_set = {max(ring_set, key=lambda n: G.out_degree(n) if n in G else 0)}
+
+    # BFS columns for ring nodes
+    col_map: dict = {}
+    for o in origin_set:
+        col_map[o] = 0
+    queue = list(origin_set)
+    visited = set(origin_set)
+    while queue:
+        node = queue.pop(0)
+        cur_col = col_map.get(node, 0)
+        for succ in (G.successors(node) if node in G else []):
+            if succ in ring_set and succ not in visited:
+                next_col = min(cur_col + 1, 3 if succ not in cashout_set else 4)
+                col_map[succ] = next_col
+                visited.add(succ)
+                queue.append(succ)
+
+    # Cashout column
+    for n in cashout_set:
+        col_map[n] = 4
+
+    # Group by column
+    col_nodes: dict = {}
+    for n, c in col_map.items():
+        col_nodes.setdefault(c, []).append(n)
+
+    # Normal nodes — last column
+    normal_nodes = [n for n in G.nodes() if n not in ring_set and n not in cashout_set]
+    col_nodes[5] = normal_nodes
+
+    # Build positions
+    pos = {}
+    x_spacing = 2.2
+    for col, nodes in sorted(col_nodes.items()):
+        x = col * x_spacing
+        n_nodes = len(nodes)
+        for i, node in enumerate(sorted(nodes)):
+            y = (i - n_nodes / 2) * 1.1 + _rnd.uniform(-0.18, 0.18)
+            pos[node] = (x, y)
+
+    # Nodes not in any column — scatter to the right
+    for node in G.nodes():
+        if node not in pos:
+            pos[node] = (5 * x_spacing + _rnd.uniform(-0.5, 0.5),
+                         _rnd.uniform(-5, 5))
+    return pos
+
+
+def _build_forensic_graph(
+    G: "nx.DiGraph",
+    pos: dict,
+    ring_accounts: list,
+    cashout_nodes: list,
+    dna_lookup: dict,
+    stage_lookup: dict,
+    hop_lookup: dict,
+    inr_rate: float,
+    focus_ring: bool = False,
+) -> go.Figure:
+    """
+    Construct a forensic-quality directed Plotly graph.
+
+    Layers (bottom to top):
+      1. Faint background edges (non-ring)
+      2. Bold highlighted ring-path edges
+      3. Arrow markers (direction)
+      4. Amount annotations on main path
+      5. Nodes (size ∝ DNA)
+    """
+    ring_set    = set(ring_accounts)
+    cashout_set = set(cashout_nodes)
+
+    # Determine origin node
+    origin_node = None
+    if ring_set:
+        ring_dns = {n: dna_lookup.get(n, 0) for n in ring_set if n in pos}
+        if ring_dns:
+            origin_node = max(ring_dns, key=ring_dns.get)
+
+    # Which nodes to render
+    if focus_ring:
+        render_nodes = [n for n in pos if n in ring_set or n in cashout_set]
+    else:
+        render_nodes = list(pos.keys())[:300]
+
+    render_set = set(render_nodes)
+
+    # ── Classify edges ─────────────────────────────────────────────────────────
+    all_edges     = [(s, d, dat) for s, d, dat in G.edges(data=True)
+                     if s in pos and d in pos and s in render_set and d in render_set]
+    ring_edges    = [(s, d, dat) for s, d, dat in all_edges
+                     if s in ring_set or d in ring_set]
+    bg_edges      = [(s, d, dat) for s, d, dat in all_edges
+                     if s not in ring_set and d not in ring_set]
+
+    # Sample background to avoid overload
+    if len(bg_edges) > 200:
+        import random as _r
+        _r.seed(42)
+        bg_edges = _r.sample(bg_edges, 200)
+
+    def _edge_xy(edges):
+        ex, ey = [], []
+        for s, d, _ in edges:
+            x0, y0 = pos[s]; x1, y1 = pos[d]
+            ex.extend([x0, x1, None]); ey.extend([y0, y1, None])
+        return ex, ey
+
+    fig = go.Figure()
+
+    # Layer 1 — faint background edges
+    if not focus_ring:
+        bx, by = _edge_xy(bg_edges)
+        if bx:
+            fig.add_trace(go.Scatter(
+                x=bx, y=by, mode="lines",
+                line=dict(width=0.3, color="rgba(99,102,241,0.07)"),
+                hoverinfo="none", showlegend=False,
+            ))
+
+    # Layer 2 — bold ring-path edges
+    rx, ry = _edge_xy(ring_edges)
+    if rx:
+        fig.add_trace(go.Scatter(
+            x=rx, y=ry, mode="lines",
+            line=dict(width=2.0, color="rgba(239,68,68,0.55)"),
+            hoverinfo="none", showlegend=False,
+        ))
+
+    # Layer 3 — directed arrow markers at 80% along ring edges
+    ax_pts, ay_pts, a_colors = [], [], []
+    for s, d, _ in ring_edges:
+        x0, y0 = pos[s]; x1, y1 = pos[d]
+        ax_pts.append(x0 + 0.80 * (x1 - x0))
+        ay_pts.append(y0 + 0.80 * (y1 - y0))
+        a_colors.append("#ef4444" if d in cashout_set else "#f97316")
+
+    if ax_pts:
+        fig.add_trace(go.Scatter(
+            x=ax_pts, y=ay_pts, mode="markers",
+            marker=dict(symbol="triangle-right", size=9,
+                        color=a_colors,
+                        line=dict(width=0)),
+            hoverinfo="none", showlegend=False,
+        ))
+
+    # Layer 4 — amount labels on main ring path (top 30 edges by weight)
+    ann_edges = sorted(ring_edges, key=lambda e: e[2].get("weight", 0), reverse=True)[:30]
+    annotations = []
+    for s, d, dat in ann_edges:
+        x0, y0 = pos[s]; x1, y1 = pos[d]
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+        amt = dat.get("weight", 0)
+        annotations.append(dict(
+            x=mx, y=my,
+            text=f"₹{amt * inr_rate:,.0f}",
+            showarrow=False,
+            font=dict(size=7, color="#f97316", family="JetBrains Mono"),
+            bgcolor="rgba(5,8,16,0.85)",
+            borderpad=2,
+        ))
+
+    # Layer 5 — nodes
+    n_colors, n_sizes, n_borders, n_hover, nx_pos, ny_pos = [], [], [], [], [], []
+    for node in render_nodes:
+        dna   = dna_lookup.get(node, 0)
+        stage = stage_lookup.get(node, "Normal")
+        hops  = hop_lookup.get(node, -1)
+
+        out_w = sum(d.get("weight", 0) for _, _, d in G.out_edges(node, data=True))
+        in_w  = sum(d.get("weight", 0) for _, _, d in G.in_edges(node, data=True))
+
+        # Size scales with DNA score
+        base_size = max(7, min(28, 7 + dna * 0.45))
+
+        if node in cashout_set:
+            color, border = "#ef4444", "#ff6b6b"
+            base_size = max(base_size, 20)
+        elif node == origin_node:
+            color, border = "#3b82f6", "#93c5fd"
+            base_size = max(base_size, 18)
+        elif node in ring_set:
+            color  = "#f97316" if dna >= 28 else "#eab308"
+            border = "#fbbf24"
+        else:
+            alpha = max(0.08, dna / 100)
+            color  = f"rgba(59,130,246,{alpha:.2f})"
+            border = "rgba(255,255,255,0.04)"
+            base_size = min(base_size, 8)
+
+        tag = ("\U0001f534 CASHOUT" if node in cashout_set else
+               "\U0001f535 ORIGIN"  if node == origin_node else
+               "\U0001f7e0 RING"    if node in ring_set else "\u26aa NORMAL")
+        hops_str = str(hops) if hops >= 0 else "unreachable"
+
+        hover = (
+            f"<b>{node}</b><br>"
+            f"Role: {tag}<br>"
+            f"DNA Score: <b>{dna:.1f}</b><br>"
+            f"Stage: {stage}<br>"
+            f"In-flow:  ₹{in_w * inr_rate:,.0f}<br>"
+            f"Out-flow: ₹{out_w * inr_rate:,.0f}<br>"
+            f"Hops to cashout: {hops_str}<br>"
+            f"Degree: {G.in_degree(node)}→{G.out_degree(node)}"
+        )
+
+        x, y = pos[node]
+        nx_pos.append(x); ny_pos.append(y)
+        n_colors.append(color)
+        n_sizes.append(base_size)
+        n_borders.append(border)
+        n_hover.append(hover)
+
+    fig.add_trace(go.Scatter(
+        x=nx_pos, y=ny_pos, mode="markers",
+        marker=dict(size=n_sizes, color=n_colors,
+                    line=dict(width=1.4, color=n_borders)),
+        text=n_hover,
+        hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+    ))
+
+    graph_h = 480 if not focus_ring else 420
+    fig.update_layout(
+        paper_bgcolor="#050810", plot_bgcolor="#050810",
+        height=graph_h,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False,
+                   title=dict(text="← Origin        Layering        Pre-Cashout        Cashout →",
+                               font=dict(size=9, color="#374151"))),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        margin=dict(l=10, r=10, t=10, b=30),
+        annotations=annotations,
+        hoverlabel=dict(bgcolor="#0d1520", font_size=11,
+                        font_family="JetBrains Mono", font_color="#e2e8f0"),
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -520,149 +795,70 @@ _kpi(k6, "Total Nodes",    str(summary["total_nodes"]),
 st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # NETWORK GRAPH + ALERT FEED
 # ─────────────────────────────────────────────────────────────────────────────
 
 graph_col, alert_col = st.columns([3, 1.15], gap="medium")
 
 with graph_col:
-    st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>TRANSACTION NETWORK GRAPH — DIRECTED</div>',
+    st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>FORENSIC TRANSACTION GRAPH — HIERARCHICAL DIRECTED</div>',
                 unsafe_allow_html=True)
-    layout  = analysis["layout"]
-    dna_df  = analysis["dna_df"]
-    display_nodes = list(layout.keys())[:300]
 
-    # ── Node styling ──────────────────────────────────────────────────────────
-    node_colors, node_sizes, node_border_colors, hover_texts = [], [], [], []
-    dna_lookup   = dna_df.set_index("node")["dna_score"].to_dict()
-    stage_lookup = {}
+    # Pre-compute lookups once
+    dna_df_graph = analysis["dna_df"]
+    dna_lookup   = dna_df_graph.set_index("node")["dna_score"].to_dict()
+    hop_lookup   = dna_df_graph.set_index("node")["hops_to_cashout"].to_dict() \
+                   if "hops_to_cashout" in dna_df_graph.columns else {}
+    stage_lookup_g = {}
     if not pred_df.empty and "node" in pred_df.columns and "stage_label" in pred_df.columns:
-        stage_lookup = pred_df.set_index("node")["stage_label"].to_dict()
+        stage_lookup_g = pred_df.set_index("node")["stage_label"].to_dict()
 
-    # Determine origin node (highest dna_score among ring_accounts)
-    origin_node = None
-    if ring_accounts:
-        ring_dns = {n: dna_lookup.get(n, 0) for n in ring_accounts}
-        if ring_dns:
-            origin_node = max(ring_dns, key=ring_dns.get)
+    # Phase 6: use suspicious subgraph when full graph > 300 nodes
+    GRAPH_TOO_LARGE = G.number_of_nodes() > 300
 
-    for node in display_nodes:
-        dna   = dna_lookup.get(node, 0)
-        stage = stage_lookup.get(node, "Normal")
+    # Phase 1: compute hierarchical layout (cached in session_state by graph size)
+    layout_key = f"_hier_layout_{G.number_of_nodes()}_{len(ring_accounts)}_{len(cashout_nodes)}"
+    if layout_key not in st.session_state:
+        st.session_state[layout_key] = _hierarchical_layout(G, ring_accounts, cashout_nodes)
+    hier_pos = st.session_state[layout_key]
 
-        if node in cashout_nodes:
-            color, size, border = "#ef4444", 18, "#ff6b6b"
-        elif node == origin_node:
-            color, size, border = "#3b82f6", 16, "#60a5fa"
-        elif node in ring_accounts:
-            color = "#f97316" if dna >= 28 else "#eab308"
-            size, border = 13, "#fbbf24"
-        else:
-            alpha = round(max(0.12, dna / 100), 2)
-            color, size, border = f"rgba(59,130,246,{alpha})", 6, "rgba(255,255,255,0.04)"
-
-        node_colors.append(color)
-        node_sizes.append(size)
-        node_border_colors.append(border)
-
-        # Rich hover tooltip
-        tag = ("🔴 CASHOUT" if node in cashout_nodes else
-               "🔵 ORIGIN"  if node == origin_node else
-               "🟠 RING"    if node in ring_accounts else "🔵 NODE")
-        out_edges = list(G.out_edges(node, data=True))
-        total_out = sum(d.get("weight", 0) for _, _, d in out_edges)
-        hover_texts.append(
-            f"<b>{node}</b><br>"
-            f"Tag: {tag}<br>"
-            f"DNA Score: <b>{dna:.1f}</b><br>"
-            f"Stage: {stage}<br>"
-            f"Out-degree: {G.out_degree(node)}  In-degree: {G.in_degree(node)}<br>"
-            f"Total Out: ₹{total_out * INR_RATE:,.0f}"
-        )
-
-    # ── Edge lines (background, all sampled edges) ────────────────────────────
-    display_edges = [
-        (s, d, dat) for s, d, dat in G.edges(data=True)
-        if s in layout and d in layout
-    ]
-    sampled_edges = random.sample(display_edges, min(500, len(display_edges)))
-
-    ex, ey   = [], []   # normal edge lines
-    rex, rey = [], []   # ring edge lines (highlighted)
-
-    for s, d, dat in sampled_edges:
-        x0, y0 = layout[s]; x1, y1 = layout[d]
-        ex.extend([x0, x1, None]); ey.extend([y0, y1, None])
-        if s in ring_accounts or d in ring_accounts:
-            rex.extend([x0, x1, None]); rey.extend([y0, y1, None])
-
-    nx_ = [layout[n][0] for n in display_nodes]
-    ny_ = [layout[n][1] for n in display_nodes]
-
-    # ── Arrowhead markers on ring edges (directed flow) ────────────────────────
-    arrow_ax, arrow_ay, arrow_colors = [], [], []
-    for s, d, dat in sampled_edges:
-        if s in ring_accounts or d in ring_accounts:
-            x0, y0 = layout[s]; x1, y1 = layout[d]
-            # Place arrowhead at 75% along the edge
-            arrow_ax.append(x0 + 0.75 * (x1 - x0))
-            arrow_ay.append(y0 + 0.75 * (y1 - y0))
-            arrow_colors.append("#ef4444" if d in cashout_nodes else "#f97316")
-
-    fig_g = go.Figure()
-
-    # Normal edges
-    fig_g.add_trace(go.Scatter(
-        x=ex, y=ey, mode="lines",
-        line=dict(width=0.35, color="rgba(99,102,241,0.12)"),
-        hoverinfo="none", showlegend=False,
-    ))
-    # Ring edges (brighter)
-    fig_g.add_trace(go.Scatter(
-        x=rex, y=rey, mode="lines",
-        line=dict(width=1.4, color="rgba(239,68,68,0.45)"),
-        hoverinfo="none", showlegend=False,
-    ))
-    # Arrow markers (direction indicators)
-    if arrow_ax:
-        fig_g.add_trace(go.Scatter(
-            x=arrow_ax, y=arrow_ay,
-            mode="markers",
-            marker=dict(
-                symbol="triangle-right", size=7,
-                color=arrow_colors,
-                line=dict(width=0, color="rgba(0,0,0,0)"),
-            ),
-            hoverinfo="none", showlegend=False,
-        ))
-    # Nodes
-    fig_g.add_trace(go.Scatter(
-        x=nx_, y=ny_, mode="markers",
-        marker=dict(
-            size=node_sizes, color=node_colors,
-            line=dict(width=1.2, color=node_border_colors),
-        ),
-        text=hover_texts,
-        hovertemplate="%{text}<extra></extra>",
-        showlegend=False,
-    ))
-
-    fig_g.update_layout(
-        paper_bgcolor="#050810", plot_bgcolor="#050810", height=460,
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        margin=dict(l=0, r=0, t=0, b=0),
-        hoverlabel=dict(bgcolor="#0d1520", font_size=11,
-                        font_family="JetBrains Mono", font_color="#e2e8f0"),
+    # Phase 5: focus toggle
+    focus_opts = ["\U0001f50d Focus: Suspicious Ring", "\U0001f310 Show Full Network"]
+    focus_default = 0 if (ring_accounts or GRAPH_TOO_LARGE) else 1
+    focus_sel = st.radio(
+        "Graph view",
+        focus_opts,
+        index=focus_default,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="graph_focus_toggle",
     )
-    st.plotly_chart(fig_g, use_container_width=True, config={"displayModeBar": False})
-    st.markdown("""
-    <div style='display:flex;gap:1.4rem;font-size:.68rem;color:#475569;margin-top:-.4rem;'>
-        <span>🔴 Cashout node</span><span>🔵 Origin / Normal</span>
-        <span>🟠 Ring member</span><span>🟡 Mid-ring</span>
-        <span>▶ Arrow = tx direction</span>
-    </div>""", unsafe_allow_html=True)
+    focus_ring_mode = "Suspicious" in focus_sel
+
+    with st.expander("📁 Transaction Network", expanded=True):
+        fig_forensic = _build_forensic_graph(
+            G            = G,
+            pos          = hier_pos,
+            ring_accounts= ring_accounts,
+            cashout_nodes= cashout_nodes,
+            dna_lookup   = dna_lookup,
+            stage_lookup = stage_lookup_g,
+            hop_lookup   = hop_lookup,
+            inr_rate     = INR_RATE,
+            focus_ring   = focus_ring_mode,
+        )
+        st.plotly_chart(fig_forensic, use_container_width=True,
+                        config={"displayModeBar": False})
+        st.markdown("""
+        <div style='display:flex;gap:1.6rem;font-size:.67rem;color:#475569;margin-top:-.5rem;
+                    flex-wrap:wrap;'>
+            <span>● <span style='color:#ef4444;'>●</span> Cashout sink</span>
+            <span>● <span style='color:#3b82f6;'>●</span> Origin node</span>
+            <span>● <span style='color:#f97316;'>●</span> High-risk ring (DNA≥28)</span>
+            <span>● <span style='color:#eab308;'>●</span> Mid-ring</span>
+            <span>● <span style='color:#475569;'>●</span> Normal node</span>
+            <span>▶ Arrow = tx direction &nbsp;·&nbsp; Size ∝ DNA score &nbsp;·&nbsp; Labels = top amounts</span>
+        </div>""", unsafe_allow_html=True)
 
 with alert_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>LIVE ALERT FEED</div>',
