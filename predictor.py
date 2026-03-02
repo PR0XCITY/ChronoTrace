@@ -104,35 +104,41 @@ def estimate_time_to_cashout(row: pd.Series, stage: int) -> float:
     """
     Estimate remaining minutes before cashout for a node in a given stage.
 
-    Uses hops_to_cashout and stage-specific average hop durations.
-    Returns 0.0 for Stage 4 (already exiting).
-    Returns -1.0 for Stage 0 (not suspicious).
+    Uses hops_to_cashout and stage-specific average hop durations with 
+    high volatility and randomness for increased realism.
     """
     if stage == 0:
         return -1.0
+        
+    # Stage 4 = Exit Imminent: Wide range of 1 to 15 minutes to avoid "fixed" feel
     if stage == 4:
-        # Stage 4 = Exit Imminent: cashout is underway but not yet complete.
-        # Use a short 3–8 minute countdown window so the timer is live, not instantly "DONE".
-        return round(np.random.uniform(3.0, 8.0), 1)
+        return round(np.random.uniform(1.2, 14.8), 1)
 
     hops = row.get("hops_to_cashout", -1)
     velocity = row.get("velocity_score", 0.3)
+    dna = row.get("dna_score", 10.0)
 
     if hops == -1:
-        # Estimate based on stage position
-        avg_hops = sum(STAGE_HOP_RANGES[stage]) / 2
+        avg_hops = sum(STAGE_HOP_RANGES[stage]) / 2 + np.random.uniform(-1, 1)
     else:
-        avg_hops = max(hops, 1)
+        avg_hops = max(hops, 0.5)
 
-    base_time = avg_hops * MINUTES_PER_HOP.get(stage, 10)
+    # Base time now picks a random value from a ±40% range of the stage constant
+    base_min = MINUTES_PER_HOP.get(stage, 10)
+    random_stage_base = np.random.uniform(base_min * 0.6, base_min * 1.4)
+    
+    base_time = avg_hops * random_stage_base
 
-    # Velocity modifier: higher velocity → faster movement
-    velocity_factor = max(0.3, 1.0 - velocity * 0.6)
-    estimated = base_time * velocity_factor
+    # Velocity and DNA intensity modifiers
+    # Higher DNA score or velocity compresses the timeline
+    intensity_factor = max(0.2, 1.2 - (velocity * 0.5 + (dna / 100.0) * 0.5))
+    estimated = base_time * intensity_factor
 
-    # Add jitter for realism
-    jitter = np.random.uniform(-estimated * 0.1, estimated * 0.1)
-    estimated = max(2.0, estimated + jitter)
+    # High-variance jitter (±25%)
+    jitter_range = estimated * 0.25
+    jitter = np.random.uniform(-jitter_range, jitter_range)
+    
+    estimated = max(1.5, estimated + jitter)
 
     return round(estimated, 1)
 
