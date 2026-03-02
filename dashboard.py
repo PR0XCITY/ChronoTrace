@@ -25,6 +25,8 @@ import alerts as alert_engine
 import gemini_layer
 import re
 import streamlit.components.v1 as components
+import dataset_loader
+import blockchain_layer
 
 # ── Currency ──────────────────────────────────────────────────────────────────
 INR_RATE = 83  # 1 USD = 83 INR
@@ -240,12 +242,14 @@ def _init():
         "intervention":          None,
         "intervention_out":      None,
         "last_mode":             None,
-        "predicted_exit_ts":     None,    # datetime — for live countdown
-        "ai_intelligence":       None,    # Gemini analysis dict (on-demand only)
-        "ai_report":             None,    # Gemini investigation report text
+        "predicted_exit_ts":     None,
+        "ai_intelligence":       None,
+        "ai_report":             None,
         "ai_report_requested":   False,
-        "ai_intel_requested":    False,   # True once user clicks Generate AI Analysis
-        "ai_metrics_json":       None,    # cached metrics for dedup check
+        "ai_intel_requested":    False,
+        "ai_metrics_json":       None,
+        "anchored":              False,
+        "anchor_result":         None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -262,49 +266,46 @@ def run_pipeline(mode: str, n_rings: int = 1):
     """Run full intelligence pipeline and cache everything to session state."""
     with st.spinner("🔄 Running intelligence pipeline…"):
 
-        # 1. Simulate + persist transactions to SQLite
-        result = simulator.run_and_persist(mode=mode, n_rings=n_rings)
+        if mode == "dataset":
+            # Dataset-backed path — no random generation
+            result = dataset_loader.build_sim_result_from_dataset()
+        else:
+            # Synthetic simulation path
+            result = simulator.run_and_persist(mode=mode, n_rings=n_rings)
 
-        # 2. Graph analysis (reads from SQLite, falls back to in-memory)
         analysis = graph_engine.analyse_from_db(result)
+        pred_df  = stage_predictor.predict(analysis["dna_df"])
 
-        # 3. Stage prediction
-        pred_df = stage_predictor.predict(analysis["dna_df"])
+        if mode != "dataset":
+            simulator.persist_predictions(result, pred_df, analysis["dna_df"])
 
-        # 4. Persist account + DNA data now that predictions exist
-        simulator.persist_predictions(result, pred_df, analysis["dna_df"])
-
-        # 5. Ring-level summary
         ring_summary = stage_predictor.predict_ring_summary(
             pred_df, result["ring_accounts"])
 
-        # 6. Alerts
         all_alerts = alert_engine.generate_all_alerts(result, analysis, pred_df)
 
-        # 7. Dynamic countdown: store absolute exit timestamp
         ttc = ring_summary.get("min_time_to_cashout", -1)
         predicted_exit_ts = (
             datetime.now() + timedelta(minutes=ttc) if ttc >= 0 else None
         )
 
-        # 8. Pre-compute metrics_json for Gemini (do NOT call API here)
-        #    Gemini is called only when the user explicitly clicks the button.
         metrics_json = gemini_layer.build_metrics_json(pred_df, ring_summary)
 
-    # Commit all to session state
     st.session_state.sim_result          = result
     st.session_state.analysis            = analysis
     st.session_state.pred_df             = pred_df
     st.session_state.alerts              = all_alerts
     st.session_state.ring_summary        = ring_summary
     st.session_state.predicted_exit_ts   = predicted_exit_ts
-    st.session_state.ai_metrics_json     = metrics_json   # stored, NOT called yet
-    st.session_state.ai_intelligence     = None           # cleared on new run
-    st.session_state.ai_intel_requested  = False          # reset button state
+    st.session_state.ai_metrics_json     = metrics_json
+    st.session_state.ai_intelligence     = None
+    st.session_state.ai_intel_requested  = False
     st.session_state.ai_report           = None
     st.session_state.ai_report_requested = False
     st.session_state.intervention        = None
     st.session_state.intervention_out    = None
+    st.session_state.anchored            = False
+    st.session_state.anchor_result       = None
     st.session_state.last_mode           = mode
 
 
@@ -324,10 +325,21 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # ── Dataset-backed run (primary for demo / Streamlit Cloud) ────────
+    st.caption("🗂️ Dataset-Backed Analysis")
+    if st.button("📊 Load transactions.csv", use_container_width=True, key="btn_dataset"):
+        run_pipeline(mode="dataset")
+        st.rerun()
+
+    st.markdown("<hr style='border-color:#1a2744;margin:.5rem 0'>", unsafe_allow_html=True)
+
+    # ── Synthetic simulation (existing) ────────────────────────────────
+    st.caption("🎲 Synthetic Simulation")
     mode_label = st.selectbox(
-        "Simulation Mode",
+        "Mode",
         ["Attack Simulation", "Normal (Baseline)"],
         help="Attack mode injects mule ring patterns.",
+        label_visibility="collapsed",
     )
     mode = "attack" if "Attack" in mode_label else "normal"
 
@@ -335,9 +347,7 @@ with st.sidebar:
     if mode == "attack":
         n_rings = st.slider("Mule Rings", 1, 3, 1)
 
-    st.markdown("---")
-
-    if st.button("▶  Run Simulation", use_container_width=True):
+    if st.button("▶️  Run Synthetic Simulation", use_container_width=True):
         run_pipeline(mode, n_rings)
         st.rerun()
 
@@ -446,8 +456,8 @@ summary      = analysis["summary"]
 G            = analysis["graph"]
 transactions = result["transactions"]
 ring_accounts= result["ring_accounts"]
-cashout_nodes= result["cashout_nodes"]
-is_attack    = result["mode"] == "attack"
+cashout_nodes= result.get("cashout_nodes", [])
+is_attack    = result.get("mode") == "attack"
 ai_intel     = st.session_state.ai_intelligence or {}
 
 
@@ -1115,6 +1125,108 @@ st.dataframe(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# IMMUTABLE AUDIT ANCHOR — Blockchain Proof of Detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<hr>", unsafe_allow_html=True)
+st.markdown("""
+<div class="sec-hdr"><span class="sec-dot"></span>IMMUTABLE AUDIT ANCHOR — BLOCKCHAIN PROOF OF DETECTION</div>
+""", unsafe_allow_html=True)
+
+_anchor_top_row = ring_summary
+_top_dna_score  = float(pred_df["dna_score"].max()) if not pred_df.empty else 0.0
+_top_stage      = ring_summary.get("max_stage_label", "Normal")
+_pqc_status     = "Quantum Vulnerable" if _top_stage in ("Pre-Cashout", "Exit Imminent") else "Quantum Safe"
+
+_anch_left, _anch_right = st.columns([1.6, 1], gap="medium")
+
+with _anch_left:
+    st.caption(
+        f"🔒 PQC Status: **{_pqc_status}**  ·  "
+        f"Top DNA: **{_top_dna_score:.1f}**  ·  "
+        f"Stage: **{_top_stage}**"
+    )
+
+    eligible = blockchain_layer.should_anchor(
+        _top_dna_score, _top_stage, _pqc_status
+    )
+
+    if not st.session_state.anchored:
+        if eligible:
+            if st.button(
+                "⛓️  Anchor to Ethereum Sepolia",
+                use_container_width=True,
+                key="btn_anchor",
+            ):
+                top_alert = all_alerts[0] if all_alerts else {}
+                anchor_payload = {
+                    "alert":         top_alert,
+                    "dna_score":     _top_dna_score,
+                    "stage":         _top_stage,
+                    "pqc_status":    _pqc_status,
+                    "timestamp":     datetime.now().isoformat(),
+                }
+                alert_hash = blockchain_layer.hash_alert(anchor_payload)
+                with st.spinner("🔗 Anchoring to Sepolia…"):
+                    anchor = blockchain_layer.anchor_to_blockchain(alert_hash)
+                st.session_state.anchor_result = {
+                    "alert_hash":    alert_hash,
+                    "tx_hash":       anchor["tx_hash"],
+                    "mode":          anchor["mode"],
+                    "etherscan_url": anchor["etherscan_url"],
+                }
+                st.session_state.anchored = True
+                st.rerun()
+        else:
+            st.info(
+                "⛓️ Blockchain anchoring activates when **Exit Imminent** stage "
+                "is detected with DNA score ≥ 25 and Quantum Vulnerable status.",
+                icon="🔐",
+            )
+    else:
+        st.success("✔️ Alert hash anchored to Ethereum Sepolia.", icon="⛓️")
+
+with _anch_right:
+    ar = st.session_state.anchor_result
+    if ar:
+        mode_color = "#22c55e" if ar["mode"] == "Live Sepolia" else "#f97316"
+        st.markdown(f"""
+        <div style='background:#080f1e;border:1px solid #1a2744;border-radius:10px;
+                    padding:1rem 1.1rem;font-size:.72rem;line-height:2;'>
+            <div style='color:#64748b;text-transform:uppercase;letter-spacing:.08em;
+                        font-size:.58rem;margin-bottom:.3rem;'>Audit Record</div>
+            <div style='color:#94a3b8;'>SHA-256&#8195;
+                <span style='color:#e2e8f0;font-family:monospace;font-size:.65rem;'>
+                    {ar['alert_hash'][:24]}…{ar['alert_hash'][-8:]}
+                </span>
+            </div>
+            <div style='color:#94a3b8;'>TX Hash&#8195;
+                <span style='color:#3b82f6;font-family:monospace;font-size:.65rem;'>
+                    {ar['tx_hash'][:18]}…{ar['tx_hash'][-6:]}
+                </span>
+            </div>
+            <div style='color:#94a3b8;'>Mode&#8195;
+                <span style='color:{mode_color};font-weight:600;'>{ar['mode']}</span>
+            </div>
+            <div style='margin-top:.5rem;'>
+                <a href='{ar["etherscan_url"]}' target='_blank'
+                   style='color:#3b82f6;text-decoration:none;font-size:.7rem;'>
+                    🔗 View on Sepolia Etherscan →
+                </a>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style='background:#080f1e;border:1px dashed #1a2744;border-radius:10px;
+                    padding:1.5rem;text-align:center;color:#374151;font-size:.75rem;'>
+            ⛓️ No anchor yet<br>
+            <span style='font-size:.65rem;'>Trigger anchoring from the left panel</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FOOTER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1125,7 +1237,7 @@ st.markdown("""
         🔍 ChronoTrace v2.0 · AI-Powered FinCrime Intelligence
     </div>
     <div style='font-size:.65rem;color:#1e293b;'>
-        Gemini 1.5 Pro · NetworkX · Pandas · SQLite · Streamlit
+        Gemini 2.5 Flash · NetworkX · Ethereum Sepolia · Streamlit
     </div>
     <div style='font-size:.65rem;color:#1e293b;'>
         © 2025 ChronoTrace Labs

@@ -4,3 +4,4 @@ numpy>=1.26.0
 networkx>=3.2.1
 plotly>=5.20.0
 google-genai
+web3>=6.0.0
