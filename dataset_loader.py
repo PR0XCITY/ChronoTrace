@@ -271,7 +271,7 @@ def build_sim_result_from_dataset() -> dict:
         "transactions":  tx_df,
         "ring_accounts": sorted(fraud_accounts),
         "cashout_nodes": cashout_nodes,          # ← fixes the KeyError
-        "accounts":      sorted(
-            pd.concat([df["sender"], df["receiver"]]).unique()
-        ),
+        "accounts":      pd.DataFrame({
+            "account_id": sorted(pd.concat([df["sender"], df["receiver"]]).unique())
+        }),
     }

@@ -603,6 +603,10 @@ def run_pipeline(mode: str, n_rings: int = 1):
         if mode == "dataset":
             # Dataset-backed path — no random generation
             result = dataset_loader.build_sim_result_from_dataset()
+            # Ensure the database reflects the dataset for graph_engine
+            db.init_db()
+            db.clear_all()
+            db.save_transactions(result["transactions"])
         else:
             # Synthetic simulation path
             result = simulator.run_and_persist(mode=mode, n_rings=n_rings)
@@ -610,8 +614,8 @@ def run_pipeline(mode: str, n_rings: int = 1):
         analysis = graph_engine.analyse_from_db(result)
         pred_df  = stage_predictor.predict(analysis["dna_df"])
 
-        if mode != "dataset":
-            simulator.persist_predictions(result, pred_df, analysis["dna_df"])
+        # Persist predictions (accounts & DNA) for both modes to ensure consistency
+        simulator.persist_predictions(result, pred_df, analysis["dna_df"])
 
         ring_summary = stage_predictor.predict_ring_summary(
             pred_df, result["ring_accounts"])
