@@ -350,7 +350,8 @@ with st.sidebar:
 
     n_rings = 1
     if mode == "attack":
-        n_rings = st.slider("Mule Rings", 1, 3, 1)
+        n_rings = st.slider("Mule Rings", 1, 10, 3,
+                            help="Number of simultaneous mule rings to inject (1–10)")
 
     if st.button("▶️  Run Synthetic Simulation", use_container_width=True):
         run_pipeline(mode, n_rings)
@@ -526,75 +527,141 @@ st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
 graph_col, alert_col = st.columns([3, 1.15], gap="medium")
 
 with graph_col:
-    st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>TRANSACTION NETWORK GRAPH</div>',
+    st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>TRANSACTION NETWORK GRAPH — DIRECTED</div>',
                 unsafe_allow_html=True)
-    layout = analysis["layout"]
-    dna_df = analysis["dna_df"]
+    layout  = analysis["layout"]
+    dna_df  = analysis["dna_df"]
     display_nodes = list(layout.keys())[:300]
 
-    node_colors, node_sizes, hover_texts = [], [], []
+    # ── Node styling ──────────────────────────────────────────────────────────
+    node_colors, node_sizes, node_border_colors, hover_texts = [], [], [], []
+    dna_lookup   = dna_df.set_index("node")["dna_score"].to_dict()
+    stage_lookup = {}
+    if not pred_df.empty and "node" in pred_df.columns and "stage_label" in pred_df.columns:
+        stage_lookup = pred_df.set_index("node")["stage_label"].to_dict()
+
+    # Determine origin node (highest dna_score among ring_accounts)
+    origin_node = None
+    if ring_accounts:
+        ring_dns = {n: dna_lookup.get(n, 0) for n in ring_accounts}
+        if ring_dns:
+            origin_node = max(ring_dns, key=ring_dns.get)
+
     for node in display_nodes:
-        r = dna_df[dna_df["node"] == node]
-        dna  = float(r["dna_score"].iloc[0]) if not r.empty else 0
-        risk = r["risk_level"].iloc[0] if not r.empty else "LOW"
+        dna   = dna_lookup.get(node, 0)
+        stage = stage_lookup.get(node, "Normal")
 
         if node in cashout_nodes:
-            c, s = "#ef4444", 18
+            color, size, border = "#ef4444", 18, "#ff6b6b"
+        elif node == origin_node:
+            color, size, border = "#3b82f6", 16, "#60a5fa"
         elif node in ring_accounts:
-            c, s = ("#f97316", 14) if risk == "CRITICAL" else ("#eab308", 11)
+            color = "#f97316" if dna >= 28 else "#eab308"
+            size, border = 13, "#fbbf24"
         else:
-            alpha = round(max(0.15, dna / 100), 2)
-            c, s = f"rgba(59,130,246,{alpha})", 6
+            alpha = round(max(0.12, dna / 100), 2)
+            color, size, border = f"rgba(59,130,246,{alpha})", 6, "rgba(255,255,255,0.04)"
 
-        node_colors.append(c)
-        node_sizes.append(s)
-        tag = "🔴 CASHOUT" if node in cashout_nodes else \
-              ("🟠 RING" if node in ring_accounts else "🔵 NODE")
+        node_colors.append(color)
+        node_sizes.append(size)
+        node_border_colors.append(border)
+
+        # Rich hover tooltip
+        tag = ("🔴 CASHOUT" if node in cashout_nodes else
+               "🔵 ORIGIN"  if node == origin_node else
+               "🟠 RING"    if node in ring_accounts else "🔵 NODE")
+        out_edges = list(G.out_edges(node, data=True))
+        total_out = sum(d.get("weight", 0) for _, _, d in out_edges)
         hover_texts.append(
-            f"<b>{node}</b><br>Tag: {tag}<br>"
-            f"DNA: {dna:.1f}<br>Out: {G.out_degree(node)} In: {G.in_degree(node)}"
+            f"<b>{node}</b><br>"
+            f"Tag: {tag}<br>"
+            f"DNA Score: <b>{dna:.1f}</b><br>"
+            f"Stage: {stage}<br>"
+            f"Out-degree: {G.out_degree(node)}  In-degree: {G.in_degree(node)}<br>"
+            f"Total Out: ₹{total_out * INR_RATE:,.0f}"
         )
 
+    # ── Edge lines (background, all sampled edges) ────────────────────────────
     display_edges = [
-        (s, d) for s, d, _ in G.edges(data=True)
+        (s, d, dat) for s, d, dat in G.edges(data=True)
         if s in layout and d in layout
     ]
-    sampled = random.sample(display_edges, min(500, len(display_edges)))
+    sampled_edges = random.sample(display_edges, min(500, len(display_edges)))
 
-    ex, ey, rex, rey = [], [], [], []
-    for s, d in sampled:
+    ex, ey   = [], []   # normal edge lines
+    rex, rey = [], []   # ring edge lines (highlighted)
+
+    for s, d, dat in sampled_edges:
         x0, y0 = layout[s]; x1, y1 = layout[d]
         ex.extend([x0, x1, None]); ey.extend([y0, y1, None])
-        if s in ring_accounts and d in ring_accounts:
+        if s in ring_accounts or d in ring_accounts:
             rex.extend([x0, x1, None]); rey.extend([y0, y1, None])
 
-    nx_, ny_ = zip(*[layout[n] for n in display_nodes]) if display_nodes else ([], [])
+    nx_ = [layout[n][0] for n in display_nodes]
+    ny_ = [layout[n][1] for n in display_nodes]
 
-    fig_g = go.Figure(data=[
-        go.Scatter(x=ex,  y=ey,  mode="lines",
-                   line=dict(width=0.4, color="rgba(99,102,241,0.18)"),
-                   hoverinfo="none", showlegend=False),
-        go.Scatter(x=rex, y=rey, mode="lines",
-                   line=dict(width=1.6, color="rgba(239,68,68,0.5)"),
-                   hoverinfo="none", showlegend=False),
-        go.Scatter(x=list(nx_), y=list(ny_), mode="markers",
-                   marker=dict(size=node_sizes, color=node_colors,
-                               line=dict(width=0.5, color="rgba(255,255,255,0.06)")),
-                   text=hover_texts, hovertemplate="%{text}<extra></extra>",
-                   showlegend=False),
-    ], layout=go.Layout(
-        paper_bgcolor="#050810", plot_bgcolor="#050810", height=440,
+    # ── Arrowhead markers on ring edges (directed flow) ────────────────────────
+    arrow_ax, arrow_ay, arrow_colors = [], [], []
+    for s, d, dat in sampled_edges:
+        if s in ring_accounts or d in ring_accounts:
+            x0, y0 = layout[s]; x1, y1 = layout[d]
+            # Place arrowhead at 75% along the edge
+            arrow_ax.append(x0 + 0.75 * (x1 - x0))
+            arrow_ay.append(y0 + 0.75 * (y1 - y0))
+            arrow_colors.append("#ef4444" if d in cashout_nodes else "#f97316")
+
+    fig_g = go.Figure()
+
+    # Normal edges
+    fig_g.add_trace(go.Scatter(
+        x=ex, y=ey, mode="lines",
+        line=dict(width=0.35, color="rgba(99,102,241,0.12)"),
+        hoverinfo="none", showlegend=False,
+    ))
+    # Ring edges (brighter)
+    fig_g.add_trace(go.Scatter(
+        x=rex, y=rey, mode="lines",
+        line=dict(width=1.4, color="rgba(239,68,68,0.45)"),
+        hoverinfo="none", showlegend=False,
+    ))
+    # Arrow markers (direction indicators)
+    if arrow_ax:
+        fig_g.add_trace(go.Scatter(
+            x=arrow_ax, y=arrow_ay,
+            mode="markers",
+            marker=dict(
+                symbol="triangle-right", size=7,
+                color=arrow_colors,
+                line=dict(width=0, color="rgba(0,0,0,0)"),
+            ),
+            hoverinfo="none", showlegend=False,
+        ))
+    # Nodes
+    fig_g.add_trace(go.Scatter(
+        x=nx_, y=ny_, mode="markers",
+        marker=dict(
+            size=node_sizes, color=node_colors,
+            line=dict(width=1.2, color=node_border_colors),
+        ),
+        text=hover_texts,
+        hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+    ))
+
+    fig_g.update_layout(
+        paper_bgcolor="#050810", plot_bgcolor="#050810", height=460,
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         margin=dict(l=0, r=0, t=0, b=0),
         hoverlabel=dict(bgcolor="#0d1520", font_size=11,
                         font_family="JetBrains Mono", font_color="#e2e8f0"),
-    ))
+    )
     st.plotly_chart(fig_g, use_container_width=True, config={"displayModeBar": False})
     st.markdown("""
-    <div style='display:flex;gap:1.2rem;font-size:.68rem;color:#374151;margin-top:-.4rem;'>
-        <span>🔴 Cashout</span><span>🟠 Critical Ring</span>
-        <span>🟡 Ring Member</span><span>🔵 Normal</span>
+    <div style='display:flex;gap:1.4rem;font-size:.68rem;color:#475569;margin-top:-.4rem;'>
+        <span>🔴 Cashout node</span><span>🔵 Origin / Normal</span>
+        <span>🟠 Ring member</span><span>🟡 Mid-ring</span>
+        <span>▶ Arrow = tx direction</span>
     </div>""", unsafe_allow_html=True)
 
 with alert_col:
@@ -1143,32 +1210,60 @@ st.markdown("""
 
 _top_dna_score = float(pred_df["dna_score"].max()) if not pred_df.empty else 0.0
 
-# Fix: 'dominant_label' is the correct key (not 'max_stage_label')
-_top_stage     = ring_summary.get("dominant_label",
-                    ring_summary.get("max_stage_label", "Normal"))
+# Phase 3: always read stage from session_state (set by run_pipeline) — single source of truth
+_top_stage = st.session_state.get("current_stage",
+                ring_summary.get("dominant_label", "Normal"))
 
-# Dynamic PQC: driven by DNA score and stage, never hardcoded
-if _top_dna_score >= 25 or _top_stage in ("Pre-Cashout", "Exit Imminent"):
+# Phase 4: full PQC tier vocabulary — 4 tiers, no truncation
+if _top_dna_score >= 35 or _top_stage == "Exit Imminent":
     _pqc_status = "Quantum Vulnerable"
-elif _top_stage in ("Layering", "Compromised"):
+elif _top_dna_score >= 25 or _top_stage in ("Pre-Cashout", "Layering"):
+    _pqc_status = "Transition Required"
+elif _top_stage == "Compromised":
     _pqc_status = "PQC Ready"
 else:
-    _pqc_status = "Quantum Safe"
+    _pqc_status = "Fully Quantum Safe"
 
 _anch_left, _anch_right = st.columns([1.6, 1], gap="medium")
 
 with _anch_left:
-    # Live debug row — shows all three anchor conditions at a glance
     eligible = blockchain_layer.should_anchor(
         _top_dna_score, _top_stage, _pqc_status
     )
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Top DNA Score", f"{_top_dna_score:.1f}",
-              delta="≥ 25 needed", delta_color="normal" if _top_dna_score >= 25 else "inverse")
-    c2.metric("Stage", _top_stage)
-    c3.metric("PQC Status", _pqc_status)
-    c4.metric("Anchor Eligible", "✔ Yes" if eligible else "✘ No",
-              delta_color="normal" if eligible else "inverse")
+    # Phase 4: fixed-width metric row so PQC label never wraps
+    st.markdown(f"""
+    <div style='display:flex;gap:.6rem;flex-wrap:nowrap;margin-bottom:.8rem;'>
+        <div style='flex:1;background:#080f1e;border:1px solid #1a2744;border-radius:8px;
+                    padding:.5rem .7rem;min-width:0;'>
+            <div style='font-size:.58rem;color:#475569;text-transform:uppercase;
+                        letter-spacing:.09em;'>Top DNA</div>
+            <div style='font-size:1.05rem;font-weight:700;color:{"#ef4444" if _top_dna_score>=25 else "#22c55e"};
+                        font-family:JetBrains Mono,monospace;'>{_top_dna_score:.1f}</div>
+        </div>
+        <div style='flex:1.4;background:#080f1e;border:1px solid #1a2744;border-radius:8px;
+                    padding:.5rem .7rem;min-width:0;'>
+            <div style='font-size:.58rem;color:#475569;text-transform:uppercase;
+                        letter-spacing:.09em;'>Stage</div>
+            <div style='font-size:.85rem;font-weight:700;color:#e2e8f0;
+                        white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{_top_stage}</div>
+        </div>
+        <div style='flex:1.8;background:#080f1e;border:1px solid #1a2744;border-radius:8px;
+                    padding:.5rem .7rem;min-width:0;'>
+            <div style='font-size:.58rem;color:#475569;text-transform:uppercase;
+                        letter-spacing:.09em;'>PQC Status</div>
+            <div style='font-size:.78rem;font-weight:700;white-space:nowrap;
+                        color:{"#ef4444" if "Vulnerable" in _pqc_status else "#f97316" if "Transition" in _pqc_status else "#3b82f6" if "Ready" in _pqc_status else "#22c55e"};'>{_pqc_status}</div>
+        </div>
+        <div style='flex:1;background:#080f1e;border:1px solid {"#22c55e" if eligible else "#1a2744"};
+                    border-radius:8px;padding:.5rem .7rem;min-width:0;'>
+            <div style='font-size:.58rem;color:#475569;text-transform:uppercase;
+                        letter-spacing:.09em;'>Eligible</div>
+            <div style='font-size:.95rem;font-weight:700;color:{"#22c55e" if eligible else "#374151"};'>
+                {"✔ Yes" if eligible else "✘ No"}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 
     if not st.session_state.anchored:
         if eligible:
