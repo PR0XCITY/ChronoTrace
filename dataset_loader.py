@@ -33,9 +33,54 @@ _KEY_FRAUDS = "_ctl_fraud_accounts"
 
 # ── Internal loaders ────────────────────────────────────────────────────────
 
+_MAX_ACCOUNTS = 200   # hard ceiling for rendering performance
+
+
+def _prune_to_top_accounts(df: pd.DataFrame, max_accounts: int) -> tuple[pd.DataFrame, bool]:
+    """
+    If unique accounts exceed max_accounts, keep only the top-N by
+    combined transaction volume (sum of amounts sent + received).
+
+    Fraud accounts are always preserved regardless of volume rank.
+    Only rows where BOTH sender AND receiver are in the selected set
+    are kept — preserving graph edge consistency.
+
+    Returns (filtered_df, was_pruned: bool).
+    """
+    all_accounts = pd.concat([df["sender"], df["receiver"]]).unique()
+    if len(all_accounts) <= max_accounts:
+        return df, False
+
+    # Volume per account (sender + receiver sides)
+    vol_sent = df.groupby("sender")["amount"].sum().rename("vol")
+    vol_recv = df.groupby("receiver")["amount"].sum().rename("vol")
+    combined = (
+        pd.concat([vol_sent, vol_recv])
+        .groupby(level=0).sum()
+        .sort_values(ascending=False)
+    )
+
+    # Always keep fraud accounts
+    fraud_set = set(df.loc[df["label"] == "fraud", "sender"]) | \
+                set(df.loc[df["label"] == "fraud", "receiver"])
+
+    top_by_vol = set(combined.head(max_accounts).index)
+    selected  = fraud_set | top_by_vol        # union, fraud always included
+    # Trim to exactly max_accounts (fraud accounts already guaranteed in)
+    if len(selected) > max_accounts:
+        non_fraud_top = [a for a in combined.index if a not in fraud_set]
+        selected = fraud_set | set(non_fraud_top[:max(0, max_accounts - len(fraud_set))])
+
+    # Filter: keep only edges where both endpoints are in selected
+    mask = df["sender"].isin(selected) & df["receiver"].isin(selected)
+    filtered = df[mask].copy().reset_index(drop=True)
+    return filtered, True
+
+
 def _load_csv() -> pd.DataFrame:
     """
     Read transactions.csv, validate columns, parse types.
+    Prunes to _MAX_ACCOUNTS top accounts if dataset is larger.
     Raises FileNotFoundError / ValueError if the CSV is missing or malformed.
     """
     if not _CSV_PATH.exists():
@@ -65,7 +110,17 @@ def _load_csv() -> pd.DataFrame:
     df["label"] = df["label"].str.strip().str.lower()
     df = df.sort_values("timestamp").reset_index(drop=True)
 
+    # Phase 2: prune to MAX_ACCOUNTS if needed
+    df, pruned = _prune_to_top_accounts(df, _MAX_ACCOUNTS)
+    # Store pruning flag for UI banner
+    try:
+        import streamlit as _st
+        _st.session_state["_ctl_dataset_pruned"] = pruned
+    except Exception:
+        pass
+
     return df
+
 
 
 def _build_graph(df: pd.DataFrame) -> nx.DiGraph:

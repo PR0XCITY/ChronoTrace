@@ -207,7 +207,7 @@ def _build_forensic_graph(
     if focus_ring:
         render_nodes = [n for n in pos if n in ring_set or n in cashout_set]
     else:
-        render_nodes = list(pos.keys())[:300]
+        render_nodes = list(pos.keys())[:200]   # Phase 6: hard cap 200
 
     render_set = set(render_nodes)
 
@@ -220,10 +220,10 @@ def _build_forensic_graph(
                      if s not in ring_set and d not in ring_set]
 
     # Sample background to avoid overload
-    if len(bg_edges) > 200:
+    if len(bg_edges) > 120:
         import random as _r
         _r.seed(42)
-        bg_edges = _r.sample(bg_edges, 200)
+        bg_edges = _r.sample(bg_edges, 120)
 
     def _edge_xy(edges):
         ex, ey = [], []
@@ -813,8 +813,21 @@ with graph_col:
     if not pred_df.empty and "node" in pred_df.columns and "stage_label" in pred_df.columns:
         stage_lookup_g = pred_df.set_index("node")["stage_label"].to_dict()
 
-    # Phase 6: use suspicious subgraph when full graph > 300 nodes
-    GRAPH_TOO_LARGE = G.number_of_nodes() > 300
+    # Phase 6 + 3: cap and warn
+    MAX_NODES = 200
+    GRAPH_TOO_LARGE = G.number_of_nodes() > MAX_NODES
+    if GRAPH_TOO_LARGE:
+        st.info(
+            f"⚠️ Graph limited to top {MAX_NODES} accounts for performance clarity. "
+            f"Full dataset has {G.number_of_nodes()} nodes.",
+            icon="📊",
+        )
+    elif st.session_state.get("_ctl_dataset_pruned"):
+        st.info(
+            f"⚠️ Dataset pruned to top {MAX_NODES} accounts by transaction volume "
+            "(fraud accounts always preserved).",
+            icon="📊",
+        )
 
     # Phase 1: compute hierarchical layout (cached in session_state by graph size)
     layout_key = f"_hier_layout_{G.number_of_nodes()}_{len(ring_accounts)}_{len(cashout_nodes)}"

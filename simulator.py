@@ -11,17 +11,26 @@ import database as db
 
 def run_and_persist(
     mode: str = "attack",
-    n_accounts: int = 1000,
-    n_normal_tx: int = 3000,
+    n_accounts: int = 200,       # ← capped at 200 for smooth rendering
+    n_normal_tx: int = 800,      # ← scaled with account count (was 3000 for 1000 accounts)
     n_rings: int = 1,
-    ring_size: int = 12,
+    ring_size: int = 10,         # ← smaller rings fit inside 200 account pool
 ) -> dict:
     """
     Run the simulation pipeline and persist all results to SQLite.
 
     Returns the same dict as simulate.run_simulation() so all existing
     downstream code continues to work unchanged.
+
+    Account ceiling: 200 — enforced here so graph rendering stays smooth.
     """
+    # Safety: never exceed 200 accounts regardless of caller argument
+    n_accounts = min(n_accounts, 200)
+
+    # Each ring needs ~ring_size+5 unique accounts; clamp ring_size so rings fit
+    max_ring_size = max(5, (n_accounts // max(n_rings, 1)) - 3)
+    ring_size = min(ring_size, max_ring_size)
+
     # 1. Run simulation (in-memory)
     result = _sim.run_simulation(
         mode=mode,
