@@ -156,27 +156,66 @@ def dataset_summary() -> dict[str, Any]:
     }
 
 
+def _derive_cashout_nodes(df: pd.DataFrame, fraud_accounts: set) -> list:
+    """
+    Identify cashout nodes from the dataset using graph topology.
+
+    A cashout node is a fraud-labelled *receiver* that has no
+    outgoing fraud transactions — i.e. it is a terminal sink of
+    the suspicious money flow.  This mirrors what the simulator
+    explicitly tags as 'cashout'.
+
+    Fallback: if topology yields nothing, return all fraud receivers
+    so dna_engine always gets a non-empty list.
+    """
+    fraud_df = df[df["label"] == "fraud"]
+
+    # Receivers in fraud transactions
+    fraud_receivers = set(fraud_df["receiver"])
+
+    # Senders in fraud transactions
+    fraud_senders = set(fraud_df["sender"])
+
+    # Terminal sinks = received money but never sent in a fraud tx
+    sinks = fraud_receivers - fraud_senders
+
+    if sinks:
+        return sorted(sinks)
+
+    # Fallback: return all fraud receivers (degenerate/circular graph)
+    return sorted(fraud_receivers) if fraud_receivers else []
+
+
 def build_sim_result_from_dataset() -> dict:
     """
-    Produce a sim_result dict (compatible with the existing DNA engine pipeline)
-    from the dataset CSV rather than from the random simulator.
+    Produce a sim_result dict fully compatible with dna_engine.analyse().
 
-    Returns the same shape that simulator.run_and_persist() returns, so
-    graph_engine.analyse_from_db() / dna_engine.analyse() can consume it
-    without modification.
+    Required keys (same as simulate.run_simulation()):
+        transactions  : DataFrame with columns source, target, amount,
+                        timestamp, tx_type, is_suspicious, tx_id
+        ring_accounts : list[str]
+        cashout_nodes : list[str]   ← derived from graph topology
+        accounts      : list[str]   ← all unique account IDs
+        mode          : str
     """
     df = get_dataset()
     fraud_accounts = get_fraud_accounts()
 
-    # dna_engine expects columns: source, target, amount, timestamp, is_suspicious
+    # ── Build transaction DataFrame in dna_engine's expected format ──────────
     tx_df = df.rename(columns={"sender": "source", "receiver": "target"}).copy()
     tx_df["is_suspicious"] = tx_df["label"] == "fraud"
+    tx_df["tx_type"] = tx_df["label"].map({"fraud": "layering", "normal": "normal"})
+    # Add a synthetic tx_id so dna_engine.build_graph() never sees a missing key
+    tx_df["tx_id"] = ["TX-DS-" + str(i).zfill(6) for i in range(len(tx_df))]
+
+    # ── Derived cashout nodes (key that dna_engine.analyse() reads directly) ─
+    cashout_nodes = _derive_cashout_nodes(df, fraud_accounts)
 
     return {
         "mode":          "dataset",
         "transactions":  tx_df,
         "ring_accounts": sorted(fraud_accounts),
-        "n_rings":       1,    # treat all fraud accounts as one logical ring
+        "cashout_nodes": cashout_nodes,          # ← fixes the KeyError
         "accounts":      sorted(
             pd.concat([df["sender"], df["receiver"]]).unique()
         ),
