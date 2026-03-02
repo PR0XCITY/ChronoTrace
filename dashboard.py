@@ -33,6 +33,21 @@ def _inr(usd: float) -> str:
     """Format a USD amount as Indian Rupees with ₹ symbol."""
     return f"₹{usd * INR_RATE:,.0f}"
 
+
+def _safe_float(v) -> float:
+    """
+    Safely convert any value to float before INR formatting.
+    Handles: raw float/int, strings with ₹ / $ / commas / trailing periods.
+    """
+    if isinstance(v, (int, float)):
+        return float(v)
+    # String cleanup: strip currency symbols, commas, whitespace, trailing periods
+    s = str(v).replace("₹", "").replace("$", "").replace(",", "").strip().rstrip(".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
 # ── Gemini report section parser ──────────────────────────────────────────────
 _SECTION_HEADERS = [
     "CASE SUMMARY", "TRANSACTION TIMELINE", "ACCOUNTS INVOLVED",
@@ -932,10 +947,14 @@ with ai_right:
                 if title:
                     st.subheader(title)
                 if body:
-                    # Replace any residual USD sign with INR in report body
-                    body = re.sub(r"\$([\d,\.]+)",
-                                  lambda m: f"₹{float(m.group(1).replace(',',''))*INR_RATE:,.0f}",
-                                  body)
+                    # Replace residual $NNN.NN amounts in report body with ₹
+                    # Pattern: $ followed by digits/commas, optional decimal part.
+                    # Does NOT capture trailing sentence periods.
+                    body = re.sub(
+                        r"\$(\d[\d,]*(?:\.\d+)?)",
+                        lambda m: f"₹{_safe_float(m.group(1).replace(',', '')) * INR_RATE:,.0f}",
+                        body,
+                    )
                     st.write(body)
                     st.divider()
 
@@ -968,7 +987,7 @@ with tbl_left:
         tx_display = tx_db[["id","sender","receiver","amount","timestamp","tx_type"]].copy()
         tx_display.columns = ["ID","From","To","Amount (₹)","Timestamp","Type"]
         tx_display["Amount (₹)"] = tx_display["Amount (₹)"].apply(
-            lambda v: f"₹{float(v) * INR_RATE:,.0f}"
+            lambda v: _inr(_safe_float(v))
         )
         st.dataframe(
             tx_display,
