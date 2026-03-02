@@ -499,6 +499,62 @@ html, body, [class*="css"] {
 }
 .stButton>button:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(0,0,0,.5); }
 hr { border-color:#1a2744; }
+
+/* Phase 1 — Stage Timeline Strip */
+.timeline-strip {
+    display:flex; align-items:center;
+    background:linear-gradient(90deg,#080f1e,#0a1525);
+    border:1px solid #1a2744; border-radius:10px;
+    padding:.55rem 1.2rem; gap:0; margin-bottom:1.1rem;
+    overflow:hidden;
+}
+.tl-step {
+    flex:1; display:flex; flex-direction:column; align-items:center;
+    padding:.3rem .5rem; position:relative;
+    font-size:.62rem; letter-spacing:.09em; text-transform:uppercase;
+    color:#374151; font-weight:500; cursor:default;
+    transition:all .3s;
+}
+.tl-step.active {
+    color:#f1f5f9; font-weight:700;
+}
+.tl-dot {
+    width:9px; height:9px; border-radius:50%;
+    margin-bottom:.32rem; transition:all .3s;
+    border:2px solid #1a2744;
+}
+.tl-step.active .tl-dot {
+    animation: pulse-glow 1.4s ease-in-out infinite;
+}
+@keyframes pulse-glow {
+    0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,0.08); transform:scale(1); }
+    50%      { box-shadow:0 0 0 6px rgba(255,255,255,0); transform:scale(1.15); }
+}
+.tl-connector {
+    flex:0 0 1.5rem; height:1px; background:#1a2744; margin-bottom:.56rem;
+}
+.tl-step.active .tl-connector { background:currentColor; }
+
+/* Phase 3 — Risk Drivers card */
+.risk-driver-bar {
+    height:4px; border-radius:2px;
+    background:linear-gradient(90deg,var(--dclr),transparent);
+    transition:width .6s ease;
+}
+
+/* Phase 6 — Quantum Scanner */
+.pqc-badge {
+    display:inline-block; padding:.22rem .75rem; border-radius:20px;
+    font-size:.68rem; font-weight:700; letter-spacing:.07em;
+    border:1px solid currentColor; white-space:nowrap;
+}
+.qrow {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:.38rem 0; border-bottom:1px solid #1a2744; font-size:.74rem;
+}
+.qrow:last-child { border:none; }
+.qk { color:#475569; font-size:.65rem; text-transform:uppercase; letter-spacing:.08em; }
+.qv { font-family:'JetBrains Mono',monospace; color:#e2e8f0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -525,7 +581,8 @@ def _init():
         "ai_metrics_json":       None,
         "anchored":              False,
         "anchor_result":         None,
-        "current_stage":         "Normal",   # set by run_pipeline; read by AI panel
+        "current_stage":         "Normal",
+        "pdf_report":            None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -657,6 +714,54 @@ with st.sidebar:
                 use_container_width=True,
             )
 
+            # Phase 9 — PDF export (HTML print)
+            _stage_pdf  = st.session_state.get("current_stage", "N/A")
+            _dna_pdf    = report.get("summary", {}).get("max_dna_score", 0)
+            _prob_pdf   = report.get("ring_summary", {}).get("max_cashout_probability", 0)
+            _hash_pdf   = (st.session_state.anchor_result or {}).get("alert_hash", "Not Anchored")
+            _ai_pdf     = (st.session_state.ai_intelligence or {})
+            _pdf_html   = f"""
+<!DOCTYPE html><html><head>
+<meta charset='utf-8'>
+<title>ChronoTrace Executive Report</title>
+<style>
+  body{{font-family:Arial,sans-serif;color:#1e293b;margin:40px;background:#fff;}}
+  h1{{color:#1d4ed8;font-size:22px;margin-bottom:4px;}}
+  .sub{{color:#64748b;font-size:12px;margin-bottom:24px;}}
+  table{{width:100%;border-collapse:collapse;margin-bottom:20px;}}
+  th{{background:#f1f5f9;padding:8px;text-align:left;font-size:11px;
+      text-transform:uppercase;letter-spacing:.07em;color:#475569;}}
+  td{{padding:8px;border-bottom:1px solid #e2e8f0;font-size:12px;}}
+  .badge{{display:inline-block;padding:3px 10px;border-radius:20px;
+          font-size:11px;font-weight:700;border:1px solid;}}
+  .footer{{margin-top:30px;font-size:10px;color:#94a3b8;}}
+</style>
+</head><body>
+<h1>&#55356;&#57076; ChronoTrace — Executive Investigation Report</h1>
+<div class='sub'>Generated: {datetime.now().strftime('%d %b %Y %H:%M IST')} &nbsp;|&nbsp; Mode: {st.session_state.get('last_mode','N/A').upper()}</div>
+<table><tr><th>Field</th><th>Value</th></tr>
+<tr><td>Laundering Stage</td><td><b>{_stage_pdf}</b></td></tr>
+<tr><td>Max DNA Score</td><td>{_dna_pdf:.1f}</td></tr>
+<tr><td>Cashout Probability</td><td>{_prob_pdf:.0f}%</td></tr>
+<tr><td>Blockchain Anchor</td><td style='font-family:monospace;font-size:10px;'>{_hash_pdf[:48]}...</td></tr>
+<tr><td>Risk Reasoning</td><td>{_ai_pdf.get('risk_reasoning','N/A')}</td></tr>
+<tr><td>Recommended Action</td><td>{_ai_pdf.get('recommended_action','N/A')}</td></tr>
+</table>
+<div class='footer'>ChronoTrace v2.0 &middot; Powered by Gemini 2.5 Flash &middot; Ethereum Sepolia &middot; NetworkX</div>
+</body></html>"""
+            import base64 as _b64
+            _pdf_b64 = _b64.b64encode(_pdf_html.encode()).decode()
+            st.markdown(f"""
+            <a href="data:text/html;base64,{_pdf_b64}"
+               download="chronotrace_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+               style='display:block;width:100%;text-align:center;
+                      background:#1d4ed8;color:#fff;padding:.45rem;
+                      border-radius:8px;font-size:.78rem;font-weight:600;
+                      text-decoration:none;margin-top:.4rem;'>
+                📊 Download Executive Report (HTML/PDF)
+            </a>
+            """, unsafe_allow_html=True)
+
     # API key status
     st.markdown("---")
     key_set = bool(gemini_layer._get_api_key())
@@ -681,23 +786,32 @@ with st.sidebar:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HEADER
+# HEADER — Executive Summary Bar  (Phase 7)
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("""
+_now_str = datetime.now().strftime("%d %b %Y  %H:%M IST")
+_mode_lbl = st.session_state.get("last_mode", "").upper() or "STANDBY"
+_mode_color = "#ef4444" if _mode_lbl == "ATTACK" else "#f97316" if _mode_lbl == "DATASET" else "#3b82f6"
+st.markdown(f"""
 <div style='display:flex;align-items:center;justify-content:space-between;
-            border-bottom:1px solid #1a2744;padding-bottom:.9rem;margin-bottom:1.3rem;'>
-    <div>
-        <div style='font-size:1.5rem;font-weight:800;letter-spacing:.05em;color:#f1f5f9;'>
-            🔍 ChronoTrace
-        </div>
-        <div style='font-size:.7rem;color:#374151;letter-spacing:.08em;margin-top:.1rem;'>
-            PREDICTING FINANCIAL CRIME BEFORE MONEY DISAPPEARS
+            border-bottom:1px solid #1a2744;padding-bottom:.9rem;margin-bottom:1.1rem;'>
+    <div style='display:flex;align-items:center;gap:.9rem;'>
+        <div style='font-size:1.5rem;font-weight:800;letter-spacing:.05em;color:#f1f5f9;'>🔍 ChronoTrace</div>
+        <div style='font-size:.62rem;color:#475569;letter-spacing:.08em;margin-top:.2rem;
+                    border-left:1px solid #1a2744;padding-left:.9rem;line-height:1.8;'>
+            Predictive AML Intelligence Platform<br>
+            <span style='color:{_mode_color};font-weight:700;letter-spacing:.1em;'>{_mode_lbl}</span>
         </div>
     </div>
-    <div style='text-align:right;'>
-        <div style='font-size:.65rem;color:#1e293b;font-family:monospace;'>LIVE THREAT INTELLIGENCE</div>
-        <div style='font-size:.8rem;color:#3b82f6;font-weight:700;font-family:monospace;'>● SYSTEM ACTIVE</div>
+    <div style='display:flex;align-items:center;gap:1.2rem;'>
+        <div style='text-align:right;'>
+            <div style='font-size:.58rem;color:#1e293b;font-family:monospace;letter-spacing:.06em;'>LIVE THREAT INTELLIGENCE</div>
+            <div style='font-size:.65rem;color:#1e293b;font-family:monospace;'>{_now_str}</div>
+        </div>
+        <div style='background:rgba(59,130,246,.08);border:1px solid #1d4ed8;
+                    border-radius:6px;padding:.25rem .7rem;
+                    font-size:.68rem;color:#3b82f6;font-weight:700;font-family:monospace;
+                    animation:blink 2s ease-in-out infinite;'>● SYSTEM ACTIVE</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -792,11 +906,103 @@ _kpi(k6, "Total Nodes",    str(summary["total_nodes"]),
      f"{summary['total_edges']} edges", "slate",
      "linear-gradient(90deg,#475569,#334155)")
 
-st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
+
+
+# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# PHASE 1 — INCIDENT TIMELINE STRIP + RISK DRIVERS
+# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+_tl_col, _rd_col = st.columns([2.6, 1.4], gap="medium")
+
+with _tl_col:
+    _cur_stage = st.session_state.get("current_stage", "Normal")
+    _stages_tl = [
+        ("Compromised",   "#eab308"),
+        ("Layering",      "#f97316"),
+        ("Pre-Cashout",   "#ef4444"),
+        ("Exit Imminent", "#dc2626"),
+    ]
+    _stage_order = ["Normal", "Compromised", "Layering", "Pre-Cashout", "Exit Imminent"]
+    _cur_idx = _stage_order.index(_cur_stage) if _cur_stage in _stage_order else 0
+
+    html_tl = "<div class='timeline-strip'>"
+    for i, (sname, scolor) in enumerate(_stages_tl):
+        s_idx = _stage_order.index(sname)
+        is_active  = _cur_stage == sname
+        is_passed  = _cur_idx > s_idx
+        dot_bg     = scolor if (is_active or is_passed) else "#1a2744"
+        dot_shadow = f"box-shadow:0 0 10px {scolor};" if is_active else ""
+        cls        = "tl-step active" if is_active else ("tl-step" if not is_passed else "tl-step")
+        tc         = scolor if is_active else ("#64748b" if is_passed else "#374151")
+        label_wt   = "700" if is_active else "400"
+        if i > 0:
+            conn_bg = scolor if is_passed else "#1a2744"
+            html_tl += f"<div class='tl-connector' style='background:{conn_bg};'></div>"
+        html_tl += f"""
+        <div class='{cls}' style='color:{tc};font-weight:{label_wt};'>
+            <div class='tl-dot' style='background:{dot_bg};border-color:{scolor};{dot_shadow}'></div>
+            {sname}
+        </div>"""
+    html_tl += "</div>"
+    st.markdown(html_tl, unsafe_allow_html=True)
+
+with _rd_col:
+    # Phase 3 — Risk Drivers card
+    _top = analysis["top_risks"].iloc[0] if not analysis["top_risks"].empty else None
+    if _top is not None:
+        _factors = [
+            ("Fan-out",       _top.get("fan_out_ratio",  0), "#ef4444"),
+            ("Hop Proximity", _top.get("hop_proximity",  0), "#f97316"),
+            ("Velocity",      _top.get("velocity_score", 0), "#eab308"),
+            ("Burst",         _top.get("burst_score",    0), "#8b5cf6"),
+            ("Amt Anomaly",   _top.get("amount_anomaly", 0), "#06b6d4"),
+        ]
+        _factors_sorted = sorted(_factors, key=lambda x: x[1], reverse=True)[:3]
+
+        # Auto-generate narrative
+        top_f  = _factors_sorted[0][0] if _factors_sorted else ""
+        top_f2 = _factors_sorted[1][0] if len(_factors_sorted) > 1 else ""
+        hop_p  = float(_top.get("hop_proximity", 0))
+        fan_o  = float(_top.get("fan_out_ratio", 0))
+        _narrative = (
+            f"{'High proximity to cashout' if hop_p > 0.5 else 'Elevated ' + top_f} "
+            f"{'and abnormal fan-out behaviour' if fan_o > 0.6 else 'and ' + top_f2 + ' signals'} "
+            f"increase exit probability."
+        )
+
+        bars_html = ""
+        for fname, fval, fclr in _factors_sorted:
+            pct = min(float(fval), 1.0) * 100
+            bars_html += f"""
+            <div style='margin-bottom:.45rem;'>
+                <div style='display:flex;justify-content:space-between;font-size:.65rem;
+                            margin-bottom:.15rem;color:#64748b;'>
+                    <span>{fname}</span>
+                    <span style='color:#e2e8f0;font-family:monospace;'>{fval:.3f}</span>
+                </div>
+                <div style='background:#1a2744;border-radius:2px;height:4px;'>
+                    <div style='width:{pct:.0f}%;height:4px;border-radius:2px;
+                                background:linear-gradient(90deg,{fclr},transparent);'></div>
+                </div>
+            </div>"""
+
+        st.markdown(f"""
+        <div style='background:#080f1e;border:1px solid #1a2744;border-radius:10px;
+                    padding:.7rem .9rem;height:100%;'>
+            <div class='sec-hdr' style='margin-bottom:.6rem;'>
+                <span class='sec-dot'></span>RISK DRIVERS
+            </div>
+            {bars_html}
+            <div style='font-size:.63rem;color:#475569;margin-top:.5rem;
+                        line-height:1.6;font-style:italic;border-top:1px solid #1a2744;
+                        padding-top:.4rem;'>{_narrative}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # NETWORK GRAPH + ALERT FEED
-# ─────────────────────────────────────────────────────────────────────────────
+# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 graph_col, alert_col = st.columns([3, 1.15], gap="medium")
 
@@ -954,9 +1160,9 @@ with cd_col:
         st.markdown("""
         <div class="cd-box" style='border-color:#dc2626;
              background:linear-gradient(135deg,#2d0505,#1a0000);text-align:center;'>
-            <div class="cd-timer" style='color:#dc2626;font-size:1.1rem;'>00:00</div>
+            <div class="cd-timer" style='color:#dc2626;font-size:0.95rem;'>00:00</div>
             <div style='font-size:.68rem;color:#dc2626;margin-top:.4rem;font-weight:600;'>
-                ⚠️ Cashout Window Expired
+                ⚠️ Cashout Occurred — Funds Exited Network
             </div>
         </div>""", unsafe_allow_html=True)
     else:
@@ -1068,6 +1274,38 @@ with gauge_col:
     st.markdown(f"""<div style='text-align:center;font-size:.76rem;font-weight:700;
                     letter-spacing:.06em;color:{bar_color};'>{rl}</div>""",
                 unsafe_allow_html=True)
+
+    # Phase 4 — Baseline Comparison
+    st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
+    _dna_all   = analysis["dna_df"]["dna_score"].dropna()
+    _susp_col  = "is_suspicious" if "is_suspicious" in analysis["dna_df"].columns else None
+    if _susp_col and _susp_col in analysis["dna_df"].columns:
+        _normal_df = analysis["dna_df"][~analysis["dna_df"][_susp_col].fillna(False)]
+    else:
+        _normal_df = analysis["dna_df"][analysis["dna_df"]["dna_score"] < 20]
+    _mean_dna     = float(_dna_all.mean()) if not _dna_all.empty else 0
+    _top_normal   = float(_normal_df["dna_score"].max()) if not _normal_df.empty else _mean_dna
+    _deviation    = ((rs - _mean_dna) / max(_mean_dna, 1)) * 100
+    _dev_color    = "#ef4444" if _deviation > 60 else "#f97316" if _deviation > 30 else "#22c55e"
+    st.markdown(f"""
+    <div style='background:#080f1e;border:1px solid #1a2744;border-radius:8px;
+                padding:.6rem .8rem;margin-top:.4rem;'>
+        <div style='font-size:.58rem;color:#475569;text-transform:uppercase;
+                    letter-spacing:.09em;margin-bottom:.5rem;'>Baseline Comparison</div>
+        <div class='mrow'>
+            <span class='mk'>Network Mean DNA</span>
+            <span class='mv'>{_mean_dna:.1f}</span>
+        </div>
+        <div class='mrow'>
+            <span class='mk'>Highest Non-Suspicious</span>
+            <span class='mv'>{_top_normal:.1f}</span>
+        </div>
+        <div class='mrow'>
+            <span class='mk'>Deviation from Mean</span>
+            <span class='mv' style='color:{_dev_color};'>+{_deviation:.0f}%</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
@@ -1409,6 +1647,78 @@ st.dataframe(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PHASE 6 — CRYPTOGRAPHIC EXPOSURE & PQC READINESS
+# ─────────────────────────────────────────────────────────────────────────────
+
+_qs_dna   = float(pred_df["dna_score"].max()) if not pred_df.empty else 0.0
+_qs_stage = st.session_state.get("current_stage", "Normal")
+
+if _qs_dna >= 35 or _qs_stage == "Exit Imminent":
+    _qs_class, _qs_color, _qs_risk = "Quantum Vulnerable",  "#ef4444", "CRITICAL"
+    _qs_tls, _qs_cipher = "TLS 1.2 (RSA-2048)", "AES-256-CBC + HMAC-SHA256"
+    _qs_kex,  _qs_fs    = "ECDH (secp256r1)",   "Partial (session-only)"
+elif _qs_dna >= 25 or _qs_stage in ("Pre-Cashout", "Layering"):
+    _qs_class, _qs_color, _qs_risk = "Transition Required", "#f97316", "HIGH"
+    _qs_tls, _qs_cipher = "TLS 1.2 / 1.3 Mixed", "AES-256-GCM"
+    _qs_kex,  _qs_fs    = "ECDH (X25519)",         "Yes (DHE)"
+elif _qs_stage == "Compromised":
+    _qs_class, _qs_color, _qs_risk = "PQC Ready",           "#3b82f6", "MODERATE"
+    _qs_tls, _qs_cipher = "TLS 1.3",  "ChaCha20-Poly1305"
+    _qs_kex,  _qs_fs    = "X25519 + Kyber-768", "Yes (PQC-Hybrid)"
+else:
+    _qs_class, _qs_color, _qs_risk = "Fully Quantum Safe",  "#22c55e", "LOW"
+    _qs_tls, _qs_cipher = "TLS 1.3",  "AES-256-GCM-SHA384"
+    _qs_kex,  _qs_fs    = "CRYSTALS-Kyber (NIST L3)", "Yes (PQC-Native)"
+
+st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>CRYPTOGRAPHIC EXPOSURE &amp; PQC READINESS</div>',
+            unsafe_allow_html=True)
+_qs_l, _qs_r = st.columns([1.6, 1], gap="medium")
+
+with _qs_l:
+    _rgb = ",".join(str(int(bytes.fromhex(_qs_color[1:])[i])) for i in range(3))
+    st.markdown(f"""
+    <div style='background:#080f1e;border:1px solid #1a2744;border-radius:12px;padding:1rem 1.2rem;'>
+        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;'>
+            <span style='font-size:.65rem;color:#475569;text-transform:uppercase;letter-spacing:.1em;'>Cryptographic Profile</span>
+            <span class='pqc-badge' style='color:{_qs_color};border-color:{_qs_color};background:rgba({_rgb},0.1);'>{_qs_class}</span>
+        </div>
+        <div class='qrow'><span class='qk'>TLS Version</span>    <span class='qv'>{_qs_tls}</span></div>
+        <div class='qrow'><span class='qk'>Cipher Suite</span>   <span class='qv'>{_qs_cipher}</span></div>
+        <div class='qrow'><span class='qk'>Key Exchange</span>   <span class='qv'>{_qs_kex}</span></div>
+        <div class='qrow'><span class='qk'>Forward Secrecy</span><span class='qv'>{_qs_fs}</span></div>
+        <div class='qrow'><span class='qk'>Risk Category</span>
+            <span class='qv' style='color:{_qs_color};font-weight:700;'>{_qs_risk}</span></div>
+    </div>""", unsafe_allow_html=True)
+
+with _qs_r:
+    if _qs_class == "Quantum Vulnerable":
+        st.markdown(f"""
+        <div style='background:linear-gradient(135deg,#1a0505,#2d0808);border:1px solid {_qs_color};
+                    border-radius:12px;padding:1rem 1.1rem;text-align:center;'>
+            <div style='font-size:.58rem;color:{_qs_color};text-transform:uppercase;
+                        letter-spacing:.1em;margin-bottom:.5rem;'>⚠ Quantum Threat Detected</div>
+            <div style='font-size:.76rem;color:#e2e8f0;line-height:1.7;'>
+                RSA / ECDH key material is vulnerable to Shor's algorithm.
+                Blockchain anchoring creates a <b>tamper-proof pre-quantum audit record</b>.
+            </div>
+            <div style='margin-top:.6rem;font-size:.63rem;color:{_qs_color};font-weight:700;'>
+                ↓ Anchor Evidence Now
+            </div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style='background:#050c18;border:1px solid #1a2744;border-radius:12px;
+                    padding:1rem 1.1rem;text-align:center;'>
+            <div style='font-size:.58rem;color:{_qs_color};text-transform:uppercase;
+                        letter-spacing:.1em;margin-bottom:.5rem;'>✔ Cryptographic Status</div>
+            <div style='font-size:.76rem;color:#64748b;line-height:1.7;'>
+                Rated <b style='color:{_qs_color};'>{_qs_class}</b>.<br>No immediate quantum exposure.
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # IMMUTABLE AUDIT ANCHOR — Blockchain Proof of Detection
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1416,6 +1726,7 @@ st.markdown("<hr>", unsafe_allow_html=True)
 st.markdown("""
 <div class="sec-hdr"><span class="sec-dot"></span>IMMUTABLE AUDIT ANCHOR — BLOCKCHAIN PROOF OF DETECTION</div>
 """, unsafe_allow_html=True)
+
 
 _top_dna_score = float(pred_df["dna_score"].max()) if not pred_df.empty else 0.0
 
