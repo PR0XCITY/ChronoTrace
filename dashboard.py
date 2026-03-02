@@ -23,6 +23,51 @@ import graph_engine
 import stage_predictor
 import alerts as alert_engine
 import gemini_layer
+import re
+import streamlit.components.v1 as components
+
+# ── Currency ──────────────────────────────────────────────────────────────────
+INR_RATE = 83  # 1 USD = 83 INR
+
+def _inr(usd: float) -> str:
+    """Format a USD amount as Indian Rupees with ₹ symbol."""
+    return f"₹{usd * INR_RATE:,.0f}"
+
+# ── Gemini report section parser ──────────────────────────────────────────────
+_SECTION_HEADERS = [
+    "CASE SUMMARY", "TRANSACTION TIMELINE", "ACCOUNTS INVOLVED",
+    "FINANCIAL IMPACT", "RECOMMENDED ACTIONS", "RISK CLASSIFICATION",
+]
+
+def _parse_report(report_text: str) -> list:
+    """
+    Split a Gemini AML report into (title, body) tuples.
+    Strips **, ***, ---, === and ## markdown artifacts.
+    Falls back to [("", cleaned_text)] if no known headers found.
+    """
+    txt = re.sub(r"\*{1,3}", "", report_text)           # bold/italic markers
+    txt = re.sub(r"^[-=]{3,}\s*$", "", txt, flags=re.M) # horizontal rules
+    txt = re.sub(r"#+ ", "", txt)                        # ATX headings
+    txt = re.sub(r"\n{3,}", "\n\n", txt.strip())         # collapse blank lines
+
+    header_rx = "|".join(
+        rf"(?:^\s*(?:\d+\.\s*)?{re.escape(h)}\s*:?)"
+        for h in _SECTION_HEADERS
+    )
+    parts = re.split(rf"({header_rx})", txt, flags=re.M | re.I)
+
+    sections: list = []
+    if parts and parts[0].strip():
+        sections.append(("", parts[0].strip()))
+    i = 1
+    while i < len(parts) - 1:
+        hdr  = parts[i].strip().lstrip("0123456789. ").rstrip(":")
+        body = parts[i + 1].strip() if (i + 1) < len(parts) else ""
+        if hdr:
+            sections.append((hdr.title(), body))
+        i += 2
+
+    return sections if sections else [("", txt)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -553,55 +598,63 @@ st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
 
 cd_col, stage_col, dna_col, gauge_col = st.columns([1, 1.1, 1.5, 1.4], gap="medium")
 
-# ── Live Countdown (client-side JS ticker) ───────────────────────────────────
+# ── Live Countdown (components.html — scripts execute inside iframe) ──────────
 with cd_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>CASHOUT COUNTDOWN</div>',
                 unsafe_allow_html=True)
 
     if predicted_exit_ts and remaining > 0:
-        # ISO timestamp passed to JS for client-side ticking
         exit_iso = predicted_exit_ts.strftime("%Y-%m-%dT%H:%M:%S")
-        st.markdown(f"""
-        <div class="cd-box">
-            <div style='font-size:.6rem;color:#7f1d1d;letter-spacing:.1em;
-                        text-transform:uppercase;margin-bottom:.5rem;'>
-                ⏱ Time to Cashout
-            </div>
-            <div class="cd-timer cd-blink" id="ct-display">--:--</div>
-            <div style='font-size:.62rem;color:#7f1d1d;margin-top:.3rem;'>minutes · seconds</div>
-        </div>
-        <script>
-        (function(){{
-            var target = new Date("{exit_iso}").getTime();
-            function tick(){{
-                var diff = target - Date.now();
-                var el   = document.getElementById("ct-display");
-                if (!el) return;
-                if (diff <= 0){{
-                    el.textContent = "CASHOUT";
-                    el.style.color = "#dc2626";
-                    return;
-                }}
-                var mins = Math.floor(diff / 60000);
-                var secs = Math.floor((diff % 60000) / 1000);
-                el.textContent = String(mins).padStart(2,"0") + ":" + String(secs).padStart(2,"0");
-                setTimeout(tick, 1000);
-            }}
-            tick();
-        }})();
-        </script>
-        """, unsafe_allow_html=True)
+        countdown_html = f"""<!DOCTYPE html><html><head>
+<style>
+  body{{margin:0;padding:0;background:transparent;}}
+  .wrap{{background:linear-gradient(135deg,#1a0505,#2d0a0a);
+         border:1px solid #7f1d1d;border-radius:12px;
+         padding:12px 16px;text-align:center;}}
+  .lbl{{font-size:.58rem;color:#7f1d1d;letter-spacing:.1em;
+        text-transform:uppercase;margin-bottom:6px;
+        font-family:sans-serif;}}
+  .dgt{{font-size:2.2rem;font-weight:700;
+        font-family:'Courier New',monospace;color:#ef4444;
+        animation:blink 1s ease-in-out infinite;}}
+  .sub{{font-size:.58rem;color:#7f1d1d;margin-top:4px;font-family:sans-serif;}}
+  @keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.5}}}}
+</style></head><body>
+<div class="wrap">
+  <div class="lbl">⏱ Time To Cashout</div>
+  <div class="dgt" id="cd">--:--</div>
+  <div class="sub" id="cs">minutes · seconds</div>
+</div>
+<script>
+  var T=new Date("{exit_iso}").getTime();
+  function tick(){{
+    var d=T-Date.now(),el=document.getElementById("cd"),sl=document.getElementById("cs");
+    if(!el){{setTimeout(tick,200);return;}}
+    if(d<=0){{el.textContent="00:00";el.style.animation="none";
+              if(sl)sl.textContent="⚠ Cashout Window Expired";return;}}
+    var m=Math.floor(d/60000),s=Math.floor((d%60000)/1000);
+    el.textContent=String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");
+    setTimeout(tick,1000);
+  }}
+  tick();
+</script></body></html>"""
+        components.html(countdown_html, height=115, scrolling=False)
+
     elif predicted_exit_ts and remaining <= 0:
         st.markdown("""
-        <div class="cd-box" style='border-color:#dc2626;background:linear-gradient(135deg,#2d0505,#1a0000);'>
-            <div class="cd-timer" style='color:#dc2626;font-size:1.3rem;'>CASHOUT COMPLETE</div>
+        <div class="cd-box" style='border-color:#dc2626;
+             background:linear-gradient(135deg,#2d0505,#1a0000);text-align:center;'>
+            <div class="cd-timer" style='color:#dc2626;font-size:1.1rem;'>00:00</div>
+            <div style='font-size:.68rem;color:#dc2626;margin-top:.4rem;font-weight:600;'>
+                ⚠️ Cashout Window Expired
+            </div>
         </div>""", unsafe_allow_html=True)
     else:
         st.markdown("""
-        <div class="cd-box" style='border-color:#14532d;background:linear-gradient(135deg,#0a1a0a,#0f2d1a);'>
-            <div style='font-size:.6rem;color:#166534;letter-spacing:.1em;text-transform:uppercase;'>
-                ✅ No Active Threat
-            </div>
+        <div class="cd-box" style='border-color:#14532d;
+             background:linear-gradient(135deg,#0a1a0a,#0f2d1a);'>
+            <div style='font-size:.6rem;color:#166534;letter-spacing:.1em;
+                        text-transform:uppercase;'>✅ No Active Threat</div>
             <div class="cd-timer" style='color:#22c55e;'>—:—</div>
         </div>""", unsafe_allow_html=True)
 
@@ -770,27 +823,25 @@ with int_col:
 
         out = st.session_state.intervention_out
         if out:
-            labels = {"freeze_ring": ("❄️ Full Ring Freeze","#3b82f6"),
-                      "freeze_origin": ("🧊 Origin Freeze","#f97316"),
-                      "monitor_only": ("👁 Monitor Only","#eab308")}
-            al, ac = labels.get(st.session_state.intervention, ("Action","#64748b"))
+            labels = {"freeze_ring":   ("❄️ Full Ring Freeze", "#3b82f6"),
+                      "freeze_origin": ("🧊 Origin Freeze",   "#f97316"),
+                      "monitor_only":  ("👁 Monitor Only",     "#eab308")}
+            al, ac = labels.get(st.session_state.intervention, ("Action", "#64748b"))
             st.markdown(f"""
             <div class="int-outcome">
                 <div style='font-size:.67rem;font-weight:700;color:{ac};
                             letter-spacing:.08em;margin-bottom:.6rem;'>{al}</div>
                 <div class="mrow"><span class="mk">Total at Risk</span>
-                    <span class="mv">${out['total_at_risk']:,.0f}</span></div>
+                    <span class="mv">{_inr(out['total_at_risk'])}</span></div>
                 <div class="mrow"><span class="mk">Est. Loss</span>
-                    <span class="mv" style="color:#ef4444;">${out['estimated_loss']:,.0f}</span></div>
+                    <span class="mv" style="color:#ef4444;">{_inr(out['estimated_loss'])}</span></div>
                 <div class="mrow"><span class="mk">Loss Prevented</span>
-                    <span class="mv" style="color:#22c55e;">${out['loss_prevented']:,.0f}</span></div>
+                    <span class="mv" style="color:#22c55e;">{_inr(out['loss_prevented'])}</span></div>
                 <div class="mrow"><span class="mk">Recovery %</span>
                     <span class="mv" style="color:#3b82f6;">{out['recovery_pct']:.0f}%</span></div>
             </div>""", unsafe_allow_html=True)
             st.progress(out["recovery_pct"] / 100)
-            st.markdown(f"""<div style='font-size:.68rem;color:#374151;margin-top:.3rem;
-                            font-style:italic;line-height:1.5;'>
-                💡 {out['recommendation']}</div>""", unsafe_allow_html=True)
+            st.caption(f"💡 {out['recommendation']}")
     else:
         st.markdown("""
         <div style='background:#08101d;border:1px solid #1a2744;border-radius:10px;
@@ -875,13 +926,18 @@ with ai_right:
             st.session_state.ai_report_requested = True
 
     if st.session_state.ai_report:
-        with st.expander("📄 View Full Investigation Report", expanded=True):
-            st.text_area(
-                label="AML Investigation Report",
-                value=st.session_state.ai_report,
-                height=420,
-                label_visibility="collapsed",
-            )
+        with st.expander("📄 View Full Investigation Report", expanded=False):
+            sections = _parse_report(st.session_state.ai_report)
+            for title, body in sections:
+                if title:
+                    st.subheader(title)
+                if body:
+                    # Replace any residual USD sign with INR in report body
+                    body = re.sub(r"\$([\d,\.]+)",
+                                  lambda m: f"₹{float(m.group(1).replace(',',''))*INR_RATE:,.0f}",
+                                  body)
+                    st.write(body)
+                    st.divider()
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
@@ -909,10 +965,11 @@ with tbl_left:
     )
 
     if not tx_db.empty:
-        # Rename for display
         tx_display = tx_db[["id","sender","receiver","amount","timestamp","tx_type"]].copy()
-        tx_display.columns = ["ID","From","To","Amount (USD)","Timestamp","Type"]
-        tx_display["Amount (USD)"] = tx_display["Amount (USD)"].map("${:,.2f}".format)
+        tx_display.columns = ["ID","From","To","Amount (₹)","Timestamp","Type"]
+        tx_display["Amount (₹)"] = tx_display["Amount (₹)"].apply(
+            lambda v: f"₹{float(v) * INR_RATE:,.0f}"
+        )
         st.dataframe(
             tx_display,
             use_container_width=True,
