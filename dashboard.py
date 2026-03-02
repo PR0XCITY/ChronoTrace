@@ -237,13 +237,15 @@ def _init():
         "pred_df":              None,
         "alerts":               [],
         "ring_summary":         {},
-        "intervention":         None,
-        "intervention_out":     None,
-        "last_mode":            None,
-        "predicted_exit_ts":    None,   # datetime — for live countdown
-        "ai_intelligence":      None,   # Gemini analysis dict
-        "ai_report":            None,   # Gemini investigation report text
-        "ai_report_requested":  False,
+        "intervention":          None,
+        "intervention_out":      None,
+        "last_mode":             None,
+        "predicted_exit_ts":     None,    # datetime — for live countdown
+        "ai_intelligence":       None,    # Gemini analysis dict (on-demand only)
+        "ai_report":             None,    # Gemini investigation report text
+        "ai_report_requested":   False,
+        "ai_intel_requested":    False,   # True once user clicks Generate AI Analysis
+        "ai_metrics_json":       None,    # cached metrics for dedup check
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -285,9 +287,9 @@ def run_pipeline(mode: str, n_rings: int = 1):
             datetime.now() + timedelta(minutes=ttc) if ttc >= 0 else None
         )
 
-        # 8. Pre-fetch Gemini intelligence (non-blocking — stored in state)
+        # 8. Pre-compute metrics_json for Gemini (do NOT call API here)
+        #    Gemini is called only when the user explicitly clicks the button.
         metrics_json = gemini_layer.build_metrics_json(pred_df, ring_summary)
-        ai_intel = gemini_layer.generate_intelligence(metrics_json)
 
     # Commit all to session state
     st.session_state.sim_result          = result
@@ -296,7 +298,9 @@ def run_pipeline(mode: str, n_rings: int = 1):
     st.session_state.alerts              = all_alerts
     st.session_state.ring_summary        = ring_summary
     st.session_state.predicted_exit_ts   = predicted_exit_ts
-    st.session_state.ai_intelligence     = ai_intel
+    st.session_state.ai_metrics_json     = metrics_json   # stored, NOT called yet
+    st.session_state.ai_intelligence     = None           # cleared on new run
+    st.session_state.ai_intel_requested  = False          # reset button state
     st.session_state.ai_report           = None
     st.session_state.ai_report_requested = False
     st.session_state.intervention        = None
@@ -881,24 +885,59 @@ ai_left, ai_right = st.columns([2, 1.5], gap="medium")
 
 with ai_left:
     has_ai = (
-        ai_intel
-        and ai_intel.get("laundering_stage") not in ("API key not configured", None, "")
+        st.session_state.ai_intelligence
+        and st.session_state.ai_intelligence.get("laundering_stage")
+            not in ("API key not configured", None, "")
     )
+    ai_intel = st.session_state.ai_intelligence or {}
+
+    # ── On-demand button — ONLY way to call Gemini for intelligence ──
+    key_active = bool(gemini_layer._get_api_key())
+    if not st.session_state.ai_intel_requested:
+        btn_label = (
+            "🤖 Generate AI Analysis"
+            if key_active
+            else "🔒 Gemini API Key Required"
+        )
+        if st.button(btn_label, use_container_width=True, disabled=not key_active,
+                     key="btn_ai_analysis"):
+            with st.spinner("� Calling Gemini 2.5 Flash…"):
+                metrics = st.session_state.get("ai_metrics_json") or \
+                          gemini_layer.build_metrics_json(pred_df, ring_summary)
+                result_intel = gemini_layer.generate_intelligence_cached(
+                    json.dumps(metrics, sort_keys=True)
+                )
+                st.session_state.ai_intelligence    = result_intel
+                st.session_state.ai_intel_requested = True
+            st.rerun()
+    else:
+        if st.button("🔄 Refresh AI Analysis", use_container_width=True,
+                     key="btn_ai_refresh"):
+            with st.spinner("🔄 Refreshing Gemini analysis…"):
+                metrics = st.session_state.get("ai_metrics_json") or \
+                          gemini_layer.build_metrics_json(pred_df, ring_summary)
+                result_intel = gemini_layer.generate_intelligence_cached(
+                    json.dumps(metrics, sort_keys=True)
+                )
+                st.session_state.ai_intelligence    = result_intel
+                st.session_state.ai_intel_requested = True
+            st.rerun()
+
+    st.markdown("")
+
     if has_ai:
-        # Header row
         st.caption("🔬 Gemini 2.5 Flash Analysis — Real-time AML risk assessment")
 
-        # Stage + confidence on one row
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Laundering Stage**")
             stage_ai = ai_intel.get("laundering_stage", "—")
-            stage_color = {
+            stage_icon = {
                 "Normal": "🟢", "Compromised": "🟡",
                 "Layering": "🟠", "Pre-Cashout": "🔴",
                 "Exit Imminent": "🚨",
             }.get(stage_ai, "⚪")
-            st.markdown(f"### {stage_color} {stage_ai}")
+            st.markdown(f"### {stage_icon} {stage_ai}")
         with col2:
             st.markdown("**Confidence Level**")
             conf = ai_intel.get("confidence_level", "N/A")
@@ -909,22 +948,31 @@ with ai_left:
             st.markdown(f"### {conf_icon} {conf}")
 
         st.divider()
-
-        # Recommended Action
         st.markdown("**Recommended Action**")
         st.write(ai_intel.get("recommended_action", "—"))
-
-        # Risk Reasoning
         st.markdown("**Risk Reasoning**")
         st.write(ai_intel.get("risk_reasoning", "—"))
 
+    elif st.session_state.ai_intel_requested:
+        # Was requested but returned an error / quota message
+        err = ai_intel.get("risk_reasoning", "")
+        if "429" in err or "quota" in err.lower() or "exhausted" in err.lower():
+            st.warning(
+                "⚠️ **AI quota temporarily exceeded.**\n\n"
+                "Using last available analysis. Try again in 60 seconds.",
+                icon="⏳",
+            )
+        else:
+            st.info(
+                "🤖 **Gemini AI not connected.**\n\n"
+                "Add `GEMINI_API_KEY` to your environment variables or "
+                "`.streamlit/secrets.toml` to enable AI-powered threat intelligence.",
+                icon="🔑",
+            )
     else:
-        # No API key state
         st.info(
-            "🤖 **Gemini AI not connected.**\n\n"
-            "Add `GEMINI_API_KEY` to your environment variables or "
-            "`.streamlit/secrets.toml` to enable AI-powered threat intelligence.",
-            icon="🔑",
+            "🤖 Click **Generate AI Analysis** to get Gemini-powered AML intelligence.",
+            icon="✨",
         )
 
 with ai_right:

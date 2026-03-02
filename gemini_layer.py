@@ -146,7 +146,6 @@ Respond with ONLY the JSON object. No preamble, no explanation outside the JSON.
         # Validate required keys
         required = {"laundering_stage", "risk_reasoning", "recommended_action", "confidence_level"}
         if not required.issubset(result.keys()):
-            # Fill any missing keys
             for key in required:
                 if key not in result:
                     result[key] = "Analysis incomplete"
@@ -154,12 +153,48 @@ Respond with ONLY the JSON object. No preamble, no explanation outside the JSON.
         return result
 
     except Exception as e:
+        err_str = str(e)
+        # Detect quota exhaustion explicitly so UI can show a friendly message
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+            return {
+                "laundering_stage":   "Quota Exceeded",
+                "risk_reasoning":     f"429 RESOURCE_EXHAUSTED: Gemini quota temporarily exceeded. "
+                                      f"Using cached result if available. Try again in ~60 seconds.",
+                "recommended_action": "Wait for quota reset, then click Refresh AI Analysis.",
+                "confidence_level":   "N/A",
+            }
         return {
             "laundering_stage":   "Error",
-            "risk_reasoning":     f"Gemini API call failed: {str(e)[:120]}",
+            "risk_reasoning":     f"Gemini API call failed: {err_str[:120]}",
             "recommended_action": "Check API key validity and quota.",
             "confidence_level":   "N/A",
         }
+
+
+# ── Cached wrapper — deduped by metrics JSON string, TTL = 60 s ──────────────
+# Takes a JSON *string* (not a dict) so st.cache_data can hash it.
+# Only invoked when the user explicitly clicks "Generate AI Analysis".
+
+import streamlit as _st  # available at module import time under Streamlit
+
+@_st.cache_data(ttl=60, show_spinner=False)
+def generate_intelligence_cached(metrics_json_str: str) -> dict:
+    """
+    Cached wrapper around generate_intelligence().
+
+    Args:
+        metrics_json_str: JSON-serialised metrics dict
+                          (produce with json.dumps(metrics, sort_keys=True)).
+
+    Returns:
+        Same dict as generate_intelligence().
+        Responses are cached for 60 s so identical metrics never re-hit the API.
+    """
+    try:
+        metrics = json.loads(metrics_json_str)
+    except (json.JSONDecodeError, TypeError):
+        metrics = {}
+    return generate_intelligence(metrics)
 
 
 # ────────────────────────────────────────────────────────────────────────────
