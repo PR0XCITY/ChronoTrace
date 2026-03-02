@@ -790,7 +790,8 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _now_str = datetime.now().strftime("%d %b %Y  %H:%M IST")
-_mode_lbl = st.session_state.get("last_mode", "").upper() or "STANDBY"
+_raw_mode = st.session_state.get("last_mode")
+_mode_lbl = _raw_mode.upper() if isinstance(_raw_mode, str) and _raw_mode.strip() else "STANDBY"
 _mode_color = "#ef4444" if _mode_lbl == "ATTACK" else "#f97316" if _mode_lbl == "DATASET" else "#3b82f6"
 st.markdown(f"""
 <div style='display:flex;align-items:center;justify-content:space-between;
