@@ -160,7 +160,6 @@ Respond with ONLY the JSON object. No preamble, no explanation outside the JSON.
 
         # ── Enforce single source of truth ────────────────────────────────────
         # stage_predictor is authoritative; Gemini must not override it.
-        # Overwrite regardless of what Gemini returned.
         deterministic = metrics_json.get("deterministic_stage")
         if deterministic:
             result["laundering_stage"] = deterministic
@@ -169,19 +168,38 @@ Respond with ONLY the JSON object. No preamble, no explanation outside the JSON.
 
     except Exception as e:
         err_str = str(e)
-        # Detect quota exhaustion explicitly so UI can show a friendly message
+        # 429 / quota exhausted
         if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
             return {
-                "laundering_stage":   "Quota Exceeded",
-                "risk_reasoning":     f"429 RESOURCE_EXHAUSTED: Gemini quota temporarily exceeded. "
-                                      f"Using cached result if available. Try again in ~60 seconds.",
+                "laundering_stage":   metrics_json.get("deterministic_stage", "N/A"),
+                "risk_reasoning":     "Gemini API quota temporarily exceeded (429). "
+                                      "Using cached result if available. Try again in ~60 seconds.",
                 "recommended_action": "Wait for quota reset, then click Refresh AI Analysis.",
                 "confidence_level":   "N/A",
             }
+        # API key missing / invalid
+        if "API_KEY" in err_str.upper() or "401" in err_str or "403" in err_str or "invalid" in err_str.lower():
+            return {
+                "laundering_stage":   metrics_json.get("deterministic_stage", "N/A"),
+                "risk_reasoning":     "Gemini API key is missing or invalid. "
+                                      "Set GEMINI_API_KEY in your environment or .streamlit/secrets.toml.",
+                "recommended_action": "Configure a valid GEMINI_API_KEY and reload.",
+                "confidence_level":   "N/A",
+            }
+        # Model not found
+        if "404" in err_str or "not found" in err_str.lower() or "model" in err_str.lower():
+            return {
+                "laundering_stage":   metrics_json.get("deterministic_stage", "N/A"),
+                "risk_reasoning":     "Gemini model could not be resolved. "
+                                      "The model name may have changed or the API is temporarily unavailable.",
+                "recommended_action": "Check Gemini model availability and API key permissions.",
+                "confidence_level":   "N/A",
+            }
+        # Generic fallback (truncated, never show raw traceback)
         return {
-            "laundering_stage":   "Error",
-            "risk_reasoning":     f"Gemini API call failed: {err_str[:120]}",
-            "recommended_action": "Check API key validity and quota.",
+            "laundering_stage":   metrics_json.get("deterministic_stage", "N/A"),
+            "risk_reasoning":     f"Gemini API call failed. Please check your connection and API key.",
+            "recommended_action": "Verify API key, quota, and network connectivity.",
             "confidence_level":   "N/A",
         }
 
@@ -281,14 +299,36 @@ Total length: 400–600 words."""
     try:
         client = _get_client()
         if client is None:
-            return "❌ Client unavailable. Check GEMINI_API_KEY."
+            return (
+                "⚠️ GEMINI_API_KEY not configured.\n\n"
+                "To enable AI-generated investigation reports:\n"
+                "  • Set the GEMINI_API_KEY environment variable, OR\n"
+                "  • Add it to .streamlit/secrets.toml as: GEMINI_API_KEY = \"your-key\"\n\n"
+                "Investigation data summary:\n"
+                f"  Accounts involved : {summary_json.get('accounts_involved', 'N/A')}\n"
+                f"  Timeline          : {summary_json.get('timeline_summary', 'N/A')}\n"
+                f"  Estimated loss    : ${summary_json.get('estimated_loss', 0):,.2f}"
+            )
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
         )
         return response.text.strip()
     except Exception as e:
-        return f"❌ Report generation failed: {str(e)}\n\nPlease check your Gemini API key and quota."
+        err_str = str(e)
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+            return (
+                "⚠️ Gemini API quota exceeded (429).\n\n"
+                "Please wait approximately 60 seconds before generating the report again."
+            )
+        if "API_KEY" in err_str.upper() or "401" in err_str or "403" in err_str:
+            return (
+                "❌ Gemini API key is missing or invalid.\n\n"
+                "Set GEMINI_API_KEY in your environment or .streamlit/secrets.toml."
+            )
+        return (
+            "❌ Report generation failed. Please check your Gemini API key and network connection."
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────────

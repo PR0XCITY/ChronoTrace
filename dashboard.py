@@ -91,89 +91,220 @@ def _parse_report(report_text: str) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FORENSIC GRAPH HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# FORENSIC GRAPH HELPERS  (topology-driven, GNN-enhanced)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import networkx as nx
+import math
+
+
+# ── Stage metadata ──────────────────────────────────────────────────────────
+_STAGE_COLS = [
+    (0, "ORIGIN",       "#3b82f6"),
+    (1, "COMPROMISED",  "#eab308"),
+    (2, "LAYERING",     "#f97316"),
+    (3, "PRE-CASHOUT",  "#ef4444"),
+    (4, "EXIT",         "#dc2626"),
+]
+_STAGE_ORDER = {s: i for i, (_, s, _) in enumerate(_STAGE_COLS)}
+
+X_GAP_HIER = 7.0   # horizontal units between hop layers
+
+
+# ── Layout ──────────────────────────────────────────────────────────────────
+
+def _bfs_hop_depths(G: "nx.DiGraph", origins: set) -> dict:
+    """
+    Multi-source BFS from all origin nodes.
+    Returns {node: min_hop_distance_from_any_origin}.
+    Nodes unreachable from any origin get depth = -1.
+    """
+    depths = {o: 0 for o in origins if o in G}
+    queue  = list(depths.keys())
+    while queue:
+        node = queue.pop(0)
+        d    = depths[node]
+        for succ in G.successors(node):
+            if succ not in depths:
+                depths[succ] = d + 1
+                queue.append(succ)
+    return depths
+
+
+def _find_critical_path(G: "nx.DiGraph", origins: set, cashout_nodes: list) -> set:
+    """
+    Find nodes on any shortest path from any origin to any cashout node.
+    Returns set of (source, destination) edge pairs on the critical path.
+    """
+    crit_edges: set = set()
+    crit_nodes: set = set()
+    for o in origins:
+        for c in cashout_nodes:
+            if o not in G or c not in G:
+                continue
+            try:
+                path = nx.shortest_path(G, o, c)
+                crit_nodes.update(path)
+                for i in range(len(path) - 1):
+                    crit_edges.add((path[i], path[i + 1]))
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                pass
+    return crit_nodes, crit_edges
+
 
 def _hierarchical_layout(
     G: "nx.DiGraph",
     ring_accounts: list,
     cashout_nodes: list,
+    stage_lookup: dict = None,
+    hybrid_scores: dict = None,
 ) -> dict:
     """
-    Assign left-to-right x positions by node role:
-        Column 0  — Origin (high in-degree from normal, high out-degree to ring)
-        Column 1  — Layer-1 mules (direct successors of origin)
-        Column 2  — Layer-2 mules (successors of L1)
-        Column 3  — Pre-cashout aggregators
-        Column 4  — Cashout sinks
-        Column 5  — All other (normal) nodes
+    Topology-driven hierarchical layout.
 
-    Y positions are spread evenly within each column with a small jitter.
+    Layout strategy:
+      1. Identify origin nodes (ring nodes with no ring predecessors).
+      2. BFS from all origins simultaneously to assign hop depth.
+      3. X = hop_depth * X_GAP_HIER.
+      4. Within each layer, sort by (out_degree DESC, hybrid_score DESC).
+         Allocate Y spacing proportional to node degree weight.
+      5. Critical-path nodes shifted slightly upward (+0.4 Y) for visual emphasis.
+      6. Normal background nodes scattered to the right in a separate column.
+      7. Cashout nodes forced to max(hop_depth) + 1 column.
+
     Returns dict {node: (x, y)}.
     """
     import random as _rnd
-    _rnd.seed(7)  # deterministic jitter
+    _rnd.seed(7)
+
+    if stage_lookup  is None: stage_lookup  = {}
+    if hybrid_scores is None: hybrid_scores = {}
 
     ring_set    = set(ring_accounts)
     cashout_set = set(cashout_nodes)
 
-    # Identify origin: ring node with no in-edges from other ring nodes
-    origin_set = set()
+    # ── 1. Identify origins ─────────────────────────────────────────────
+    origin_set: set = set()
     for n in ring_set:
         if n in G and not any(p in ring_set for p in G.predecessors(n)):
             origin_set.add(n)
     if not origin_set and ring_set:
-        # Fallback: highest out-degree ring node
         origin_set = {max(ring_set, key=lambda n: G.out_degree(n) if n in G else 0)}
 
-    # BFS columns for ring nodes
+    # ── 2. BFS hop depths ───────────────────────────────────────────────
+    hop = _bfs_hop_depths(G, origin_set)
+
+    # ── 3. Critical path ────────────────────────────────────────────────
+    crit_nodes, crit_edges_set = _find_critical_path(G, origin_set, cashout_nodes)
+
+    # ── 4. Assign columns ───────────────────────────────────────────────
+    max_ring_hop = max((hop.get(n, 0) for n in ring_set if n in hop), default=2)
+
     col_map: dict = {}
-    for o in origin_set:
-        col_map[o] = 0
-    queue = list(origin_set)
-    visited = set(origin_set)
-    while queue:
-        node = queue.pop(0)
-        cur_col = col_map.get(node, 0)
-        for succ in (G.successors(node) if node in G else []):
-            if succ in ring_set and succ not in visited:
-                next_col = min(cur_col + 1, 3 if succ not in cashout_set else 4)
-                col_map[succ] = next_col
-                visited.add(succ)
-                queue.append(succ)
+    for n in G.nodes():
+        if n in cashout_set:
+            col_map[n] = max_ring_hop + 1   # one column beyond deepest ring node
+        elif n in ring_set:
+            col_map[n] = hop.get(n, 2)      # BFS depth = column
+        else:
+            col_map[n] = max_ring_hop + 3   # background nodes far right
 
-    # Cashout column
-    for n in cashout_set:
-        col_map[n] = 4
-
-    # Group by column
-    col_nodes: dict = {}
+    # ── 5. Group by column ──────────────────────────────────────────────
+    col_buckets: dict = {}
     for n, c in col_map.items():
-        col_nodes.setdefault(c, []).append(n)
+        col_buckets.setdefault(c, []).append(n)
 
-    # Normal nodes — last column
-    normal_nodes = [n for n in G.nodes() if n not in ring_set and n not in cashout_set]
-    col_nodes[5] = normal_nodes
+    # ── 6. Build positions ──────────────────────────────────────────────
+    pos: dict = {}
+    MIN_GAP   = 1.6   # minimum vertical gap (units)
 
-    # Build positions
-    pos = {}
-    x_spacing = 2.2
-    for col, nodes in sorted(col_nodes.items()):
-        x = col * x_spacing
-        n_nodes = len(nodes)
-        for i, node in enumerate(sorted(nodes)):
-            y = (i - n_nodes / 2) * 1.1 + _rnd.uniform(-0.18, 0.18)
-            pos[node] = (x, y)
+    for col, nodes in sorted(col_buckets.items()):
+        x = col * X_GAP_HIER
 
-    # Nodes not in any column — scatter to the right
+        # Sort within layer: out_degree DESC, hybrid_score DESC
+        def _sort_key(n):
+            deg  = G.out_degree(n) + G.in_degree(n) if n in G else 0
+            hyb  = float(hybrid_scores.get(n, 0))
+            return (-deg, -hyb)
+
+        nodes_sorted = sorted(nodes, key=_sort_key)
+        n_nodes      = len(nodes_sorted)
+
+        # Degree-weight proportional Y allocation
+        weights = []
+        for n in nodes_sorted:
+            deg = max(G.out_degree(n) + G.in_degree(n), 1) if n in G else 1
+            weights.append(float(deg))
+        total_w = sum(weights) or 1.0
+
+        # Build cumulative Y positions (scaled so total span adapts to content)
+        total_span = max(n_nodes * MIN_GAP, (n_nodes - 1) * MIN_GAP)
+        ys: list = []
+        cumulative = 0.0
+        for w in weights:
+            ys.append(cumulative)
+            cumulative += (w / total_w) * total_span
+        # Center around 0
+        center = cumulative / 2.0
+        ys = [y - center for y in ys]
+
+        for node, y in zip(nodes_sorted, ys):
+            # Critical-path nodes nudge up for visual clarity
+            y_offset = 0.35 if node in crit_nodes and node not in cashout_set else 0.0
+            jitter   = _rnd.uniform(-0.05, 0.05)
+            pos[node] = (x, y + y_offset + jitter)
+
+    # Safety: any node still unplaced (disconnected)
+    max_col_x = max((c * X_GAP_HIER for c in col_buckets), default=0)
     for node in G.nodes():
         if node not in pos:
-            pos[node] = (5 * x_spacing + _rnd.uniform(-0.5, 0.5),
-                         _rnd.uniform(-5, 5))
+            pos[node] = (max_col_x + X_GAP_HIER + _rnd.uniform(-0.4, 0.4),
+                         _rnd.uniform(-6, 6))
     return pos
 
+
+def _spring_layout_raw(G: "nx.DiGraph", seed: int = 42) -> dict:
+    """Wide spring layout for raw (pre-intelligence) network view."""
+    if not G.nodes:
+        return {}
+    nodes = list(G.nodes())[:200]
+    sub   = G.subgraph(nodes)
+    pos   = nx.spring_layout(sub, seed=seed, k=2.8, iterations=80)
+    return dict(pos)
+
+
+# ── Bezier curve helper ──────────────────────────────────────────────────────
+
+def _bezier_pts(x0, y0, x1, y1, n_pts=14, bow=0.6):
+    """
+    Approximate quadratic bezier from (x0,y0) to (x1,y1).
+    Control point is offset perpendicular to the midpoint.
+    Returns (xs, ys) lists with None separator for Plotly.
+    """
+    mx = (x0 + x1) / 2
+    my = (y0 + y1) / 2
+    # Perpendicular offset (upward bow for horizontal edges)
+    dx = x1 - x0; dy = y1 - y0
+    length = math.sqrt(dx*dx + dy*dy) or 1.0
+    # Perp direction (rotate 90 deg)
+    px = -dy / length; py = dx / length
+    cx = mx + px * bow
+    cy = my + py * bow
+
+    pts_x, pts_y = [], []
+    for i in range(n_pts):
+        t = i / (n_pts - 1)
+        bx = (1-t)**2 * x0 + 2*(1-t)*t * cx + t**2 * x1
+        by = (1-t)**2 * y0 + 2*(1-t)*t * cy + t**2 * y1
+        pts_x.append(bx); pts_y.append(by)
+    pts_x.append(None); pts_y.append(None)
+    return pts_x, pts_y
+
+
+# ── Main graph renderer ──────────────────────────────────────────────────────
 
 def _build_forensic_graph(
     G: "nx.DiGraph",
@@ -186,174 +317,428 @@ def _build_forensic_graph(
     inr_rate: float,
     focus_ring: bool = False,
     intelligence_mode: bool = True,
-) -> go.Figure:
+    frozen_nodes: list = None,
+    gnn_scores: dict = None,
+    hybrid_scores: dict = None,
+) -> "go.Figure":
     """
-    Construct a forensic-quality directed Plotly graph.
-    Intelligence Mode toggles visibility of DNA-based risk signals.
+    Demo-grade forensic directed Plotly graph.
+
+    Intelligence Mode:
+      - BFS topology-driven hierarchical layout
+      - Stage column headers  + faint dotted separators
+      - 3-tier edge rendering:
+            bg        0.03 opacity, 0.3px
+            adj       0.20 opacity, 0.7px
+            critical  0.85 opacity, 2.2px + arrowheads + bezier curvature
+      - Top-10 amount labels offset above edge midpoint
+      - DNA-proportional node sizes (6→32px)
+      - GNN glow ring on structurally anomalous nodes
+      - Rich hover: Stage, DNA, GNN Score, Hybrid, In/Out-flow, Hops
+
+    Raw Mode:
+      - Spring layout, neutral blue palette, no DNA colors
+      - Thin semi-transparent edges, degree-scaled nodes
+      - Flow + degree tooltips
     """
     ring_set    = set(ring_accounts) if intelligence_mode else set()
     cashout_set = set(cashout_nodes) if intelligence_mode else set()
+    frozen_set  = set(frozen_nodes   or [])
+    gnn_sc      = gnn_scores     or {}
+    hyb_sc      = hybrid_scores  or {}
 
-    # Determine origin node
+    # ── Identify origin ─────────────────────────────────────────────────
     origin_node = None
     if ring_set and intelligence_mode:
-        ring_dns = {n: dna_lookup.get(n, 0) for n in ring_set if n in pos}
-        if ring_dns:
-            origin_node = max(ring_dns, key=ring_dns.get)
+        candidates = {
+            n: float(dna_lookup.get(n, 0)) for n in ring_set
+            if n in G and n in pos and not any(p in ring_set for p in G.predecessors(n))
+        }
+        if candidates:
+            origin_node = max(candidates, key=candidates.get)
+        elif ring_set:
+            origin_node = max(
+                (n for n in ring_set if n in pos),
+                key=lambda n: float(dna_lookup.get(n, 0)),
+                default=None,
+            )
 
-    # Which nodes to render
+    # ── Critical path edges ─────────────────────────────────────────────
+    origins_for_path = {origin_node} if origin_node else set()
+    _, _crit_edge_set = _find_critical_path(G, origins_for_path, cashout_nodes)
+
+    # ── Nodes to render ─────────────────────────────────────────────────
     if focus_ring and intelligence_mode:
         render_nodes = [n for n in pos if n in ring_set or n in cashout_set]
     else:
         render_nodes = list(pos.keys())[:200]
-
     render_set = set(render_nodes)
 
-    # ── Classify edges ─────────────────────────────────────────────────────────
-    all_edges     = [(s, d, dat) for s, d, dat in G.edges(data=True)
-                     if s in pos and d in pos and s in render_set and d in render_set]
-    
+    # ── Edge classification ─────────────────────────────────────────────
+    all_edges_raw = [
+        (s, d, dat) for s, d, dat in G.edges(data=True)
+        if s in pos and d in pos and s in render_set and d in render_set
+    ]
+
     if intelligence_mode:
-        ring_edges = [(s, d, dat) for s, d, dat in all_edges if s in ring_set or d in ring_set]
-        bg_edges   = [(s, d, dat) for s, d, dat in all_edges if s not in ring_set and d not in ring_set]
+        critical_edges = [
+            (s, d, dat) for s, d, dat in all_edges_raw
+            if (s in ring_set or s in cashout_set) and (d in ring_set or d in cashout_set)
+        ]
+        crit_pair_set  = {(s, d) for s, d, _ in critical_edges}
+        ring_adj_edges = [
+            (s, d, dat) for s, d, dat in all_edges_raw
+            if (s in ring_set or d in ring_set) and (s, d) not in crit_pair_set
+        ]
+        bg_edges = [
+            (s, d, dat) for s, d, dat in all_edges_raw
+            if s not in ring_set and d not in ring_set
+        ]
     else:
-        ring_edges = []
-        bg_edges   = all_edges
+        critical_edges, ring_adj_edges, bg_edges = [], [], all_edges_raw
 
-    # Sample background
-    if len(bg_edges) > 120:
-        import random as _r
-        _r.seed(42)
-        bg_edges = _r.sample(bg_edges, 120)
+    if len(bg_edges) > 60:
+        import random as _r; _r.seed(42)
+        bg_edges = _r.sample(bg_edges, 60)
 
-    def _edge_xy(edges):
+    # ── Edge geometry helpers ───────────────────────────────────────────
+    def _straight_xy(edges):
         ex, ey = [], []
         for s, d, _ in edges:
             x0, y0 = pos[s]; x1, y1 = pos[d]
             ex.extend([x0, x1, None]); ey.extend([y0, y1, None])
         return ex, ey
 
+    def _arrow_pts(edges, t=0.70):
+        ax, ay = [], []
+        for s, d, _ in edges:
+            x0, y0 = pos[s]; x1, y1 = pos[d]
+            ax.append(x0 + t * (x1 - x0))
+            ay.append(y0 + t * (y1 - y0))
+        return ax, ay
+
     fig = go.Figure()
+    annotations: list = []
 
-    # Layer 1 — background edges
-    bx, by = _edge_xy(bg_edges)
-    if bx:
-        edge_color = "rgba(99,102,241,0.07)" if intelligence_mode else "rgba(100,116,139,0.15)"
-        fig.add_trace(go.Scatter(
-            x=bx, y=by, mode="lines",
-            line=dict(width=0.4 if not intelligence_mode else 0.3, color=edge_color),
-            hoverinfo="none", showlegend=False,
-        ))
+    # ═══════════════════════════════════════════════════════════ INTELLIGENCE
+    if intelligence_mode:
+        # ── Compute canvas bounds from actual positions ───────────────────
+        xs_all = [x for _, (x, _) in pos.items()] if pos else [0]
+        ys_all = [y for _, (_, y) in pos.items()] if pos else [0]
+        x_min  = min(xs_all) - X_GAP_HIER * 0.55
+        x_max  = max(xs_all) + X_GAP_HIER * 0.55
+        y_min  = min(ys_all) - 2.0
+        y_max  = max(ys_all) + 2.0
 
-    # Layer 2 — highlighted ring edges
-    if intelligence_mode and ring_edges:
-        rx, ry = _edge_xy(ring_edges)
-        fig.add_trace(go.Scatter(
-            x=rx, y=ry, mode="lines",
-            line=dict(width=2.2, color="rgba(239,68,68,0.6)"),
-            hoverinfo="none", showlegend=False,
-        ))
+        # Auto-scale height: base 520 + 70px per node in tallest layer
+        col_counts: dict = {}
+        for node in render_nodes:
+            if node not in pos: continue
+            cx = round(pos[node][0] / X_GAP_HIER)
+            col_counts[cx] = col_counts.get(cx, 0) + 1
+        max_nodes_in_col = max(col_counts.values(), default=1)
+        fig_height = max(520, min(900, 280 + max_nodes_in_col * 72))
 
-    # Layer 3 — arrows
-    if intelligence_mode and ring_edges:
-        ax_pts, ay_pts, a_colors = [], [], []
-        for s, d, _ in ring_edges:
-            x0, y0 = pos[s]; x1, y1 = pos[d]
-            ax_pts.append(x0 + 0.80 * (x1 - x0))
-            ay_pts.append(y0 + 0.80 * (y1 - y0))
-            a_colors.append("#ef4444" if d in cashout_set else "#f97316")
-        
-        fig.add_trace(go.Scatter(
-            x=ax_pts, y=ay_pts, mode="markers",
-            marker=dict(symbol="triangle-right", size=9, color=a_colors),
-            hoverinfo="none", showlegend=False,
-        ))
-
-    # Layer 4 — Amount Labels (Intelligence only)
-    annotations = []
-    if intelligence_mode and ring_edges:
-        ann_edges = sorted(ring_edges, key=lambda e: e[2].get("weight", 0), reverse=True)[:8]
-        for s, d, dat in ann_edges:
-            x0, y0 = pos[s]; x1, y1 = pos[d]
-            mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-            amt = dat.get("weight", 0)
+        # ── Stage column headers ──────────────────────────────────────────
+        for col, label, clr in _STAGE_COLS:
             annotations.append(dict(
-                x=mx, y=my, text=f"₹{amt * inr_rate:,.0f}",
-                showarrow=False, font=dict(size=8, color="#f97316"),
-                bgcolor="rgba(5,8,16,0.9)", borderpad=2,
+                x=col * X_GAP_HIER, y=y_max + 0.4,
+                text=f"<b>{label}</b>",
+                showarrow=False,
+                font=dict(size=9, color=clr, family="JetBrains Mono"),
+                xanchor="center", yanchor="bottom",
             ))
 
-    # Layer 5 — Nodes
-    n_colors, n_sizes, n_borders, n_hover, nx_pos, ny_pos = [], [], [], [], [], []
-    for node in render_nodes:
-        x, y = pos[node]
-        nx_pos.append(x); ny_pos.append(y)
-        
-        if intelligence_mode:
-            dna   = dna_lookup.get(node, 0)
+        # ── Faint dotted vertical separators ─────────────────────────────
+        for col, _, _ in _STAGE_COLS[1:]:
+            sx = col * X_GAP_HIER - X_GAP_HIER / 2
+            fig.add_shape(
+                type="line",
+                x0=sx, x1=sx, y0=y_min, y1=y_max,
+                line=dict(color="rgba(99,102,241,0.09)", width=1, dash="dot"),
+            )
+
+        # ── L1: Background edges — 3% opacity ────────────────────────────
+        bx, by = _straight_xy(bg_edges)
+        if bx:
+            fig.add_trace(go.Scatter(
+                x=bx, y=by, mode="lines",
+                line=dict(width=0.3, color="rgba(99,102,241,0.03)"),
+                hoverinfo="none", showlegend=False,
+            ))
+
+        # ── L2: Ring-adjacent edges — 20% opacity ────────────────────────
+        if ring_adj_edges:
+            rx, ry = _straight_xy(ring_adj_edges)
+            fig.add_trace(go.Scatter(
+                x=rx, y=ry, mode="lines",
+                line=dict(width=0.7, color="rgba(249,115,22,0.20)"),
+                hoverinfo="none", showlegend=False,
+            ))
+
+        # ── L3: Critical-path edges — bezier curve + 85% opacity ──────────
+        if critical_edges:
+            # Sort to separate on-path vs off-path within critical
+            on_path  = [(s, d, dat) for s, d, dat in critical_edges
+                        if (s, d) in _crit_edge_set]
+            off_path = [(s, d, dat) for s, d, dat in critical_edges
+                        if (s, d) not in _crit_edge_set]
+
+            # Off-path critical (ring-to-ring, not on shortest path): lower opacity
+            if off_path:
+                ox, oy = _straight_xy(off_path)
+                fig.add_trace(go.Scatter(
+                    x=ox, y=oy, mode="lines",
+                    line=dict(width=1.2, color="rgba(239,68,68,0.40)"),
+                    hoverinfo="none", showlegend=False,
+                ))
+
+            # On-path: bezier curves for long hops, straight for 1-hop
+            c_bx, c_by = [], []
+            for s, d, dat in on_path:
+                x0, y0 = pos[s]; x1, y1 = pos[d]
+                hop_dist = abs(round(x0 / X_GAP_HIER) - round(x1 / X_GAP_HIER))
+                if hop_dist > 1:
+                    # Quadratic bezier with perpendicular bow
+                    bow    = min(hop_dist * 0.5, 2.5)
+                    pts_x, pts_y = _bezier_pts(x0, y0, x1, y1, n_pts=18, bow=bow)
+                    c_bx.extend(pts_x); c_by.extend(pts_y)
+                else:
+                    c_bx.extend([x0, x1, None]); c_by.extend([y0, y1, None])
+
+            if c_bx:
+                fig.add_trace(go.Scatter(
+                    x=c_bx, y=c_by, mode="lines",
+                    line=dict(width=2.4, color="rgba(239,68,68,0.85)"),
+                    hoverinfo="none", showlegend=False,
+                ))
+
+            # Arrowheads on critical path only
+            axs, ays = _arrow_pts(critical_edges)
+            if axs:
+                fig.add_trace(go.Scatter(
+                    x=axs, y=ays, mode="markers",
+                    marker=dict(symbol="triangle-right", size=6,
+                                color="#ef4444", opacity=0.85),
+                    hoverinfo="none", showlegend=False,
+                ))
+
+        # ── Top-10 amount labels (offset above edge midpoint) ─────────────
+        label_edges = sorted(critical_edges,
+                             key=lambda e: float(e[2].get("weight", 0)),
+                             reverse=True)[:10]
+        for s, d, dat in label_edges:
+            x0, y0 = pos[s]; x1, y1 = pos[d]
+            mx = (x0 + x1) / 2.0
+            my = (y0 + y1) / 2.0 + 0.36
+            amt = float(dat.get("weight", 0))
+            annotations.append(dict(
+                x=mx, y=my,
+                text=f"\u20b9{amt * inr_rate:,.0f}",
+                showarrow=False,
+                font=dict(size=7.5, color="#fb923c", family="JetBrains Mono"),
+                bgcolor="rgba(5,8,16,0.82)",
+                borderpad=2, bordercolor="rgba(249,115,22,0.15)",
+                borderwidth=1, xanchor="center",
+            ))
+
+        # ── GNN glow rings (structural anomaly > 0.55) ────────────────────
+        gnn_glow_x, gnn_glow_y, gnn_glow_sz, gnn_glow_col = [], [], [], []
+        for node in render_nodes:
+            gnn_v = float(gnn_sc.get(node, 0))
+            if gnn_v > 0.55 and node in pos:
+                x, y = pos[node]
+                gnn_glow_x.append(x); gnn_glow_y.append(y)
+                # Glow size proportional to GNN confidence
+                gnn_glow_sz.append(round(24 + gnn_v * 24, 1))
+                alpha = round(0.10 + gnn_v * 0.20, 2)
+                gnn_glow_col.append(f"rgba(168,85,247,{alpha})")   # purple glow
+
+        if gnn_glow_x:
+            fig.add_trace(go.Scatter(
+                x=gnn_glow_x, y=gnn_glow_y, mode="markers",
+                marker=dict(size=gnn_glow_sz, color=gnn_glow_col,
+                            line=dict(width=0)),
+                hoverinfo="none", showlegend=False,
+            ))
+
+        # ── Nodes ─────────────────────────────────────────────────────────
+        dna_vals = [float(dna_lookup.get(n, 0)) for n in render_nodes]
+        max_dna  = max(max(dna_vals, default=1.0), 1.0)
+
+        STAGE_COLORS = {
+            "Exit Imminent": ("#dc2626", "#ff6b6b"),
+            "Pre-Cashout":   ("#ef4444", "#fca5a5"),
+            "Layering":      ("#f97316", "#fdba74"),
+            "Compromised":   ("#eab308", "#fde047"),
+            "Normal":        ("#475569", "#64748b"),
+        }
+
+        n_colors, n_sizes, n_borders, n_symbols, n_hover, nx_pts, ny_pts = \
+            [], [], [], [], [], [], []
+
+        for node in render_nodes:
+            if node not in pos: continue
+            x, y = pos[node]
+            nx_pts.append(x); ny_pts.append(y)
+
+            dna   = float(dna_lookup.get(node, 0))
             stage = stage_lookup.get(node, "Normal")
             hops  = hop_lookup.get(node, -1)
             out_w = sum(d.get("weight", 0) for _, _, d in G.out_edges(node, data=True))
             in_w  = sum(d.get("weight", 0) for _, _, d in G.in_edges(node, data=True))
+            gnn_v = float(gnn_sc.get(node, 0))
+            hyb_v = float(hyb_sc.get(node, dna / max_dna))
 
-            base_size = max(7, min(28, 7 + dna * 0.45))
-            if node in cashout_set:
-                color, border = "#ef4444", "#ff6b6b"
-                base_size = max(base_size, 20)
+            norm_dna  = dna / max_dna
+            base_size = max(6.0, min(32.0, 6 + norm_dna * 26))
+
+            if node in frozen_set:
+                color, border, symbol = "#374151", "#6b7280", "x"
+                base_size = max(base_size, 14)
+                role = "\U0001f9ca FROZEN"
+            elif node in cashout_set:
+                color, border, symbol = "#dc2626", "#fca5a5", "diamond"
+                base_size = max(base_size, 24)
+                role = "\U0001f6a8 CASHOUT SINK"
             elif node == origin_node:
-                color, border = "#3b82f6", "#93c5fd"
-                base_size = max(base_size, 18)
+                color, border, symbol = "#3b82f6", "#93c5fd", "star"
+                base_size = max(base_size, 22)
+                role = "\U0001f3af ORIGIN"
             elif node in ring_set:
-                color  = "#f97316" if dna >= 28 else "#eab308"
-                border = "#fbbf24"
+                color, border = STAGE_COLORS.get(stage, ("#f97316", "#fdba74"))
+                symbol = "circle"
+                base_size = max(base_size, 12)
+                role = f"\U0001f504 RING \u00b7 {stage}"
             else:
-                alpha = max(0.12, dna / 100)
+                alpha = max(0.07, norm_dna * 0.35)
                 color  = f"rgba(59,130,246,{alpha:.2f})"
-                border = "rgba(255,255,255,0.04)"
-                base_size = min(base_size, 10)
+                border = "rgba(99,102,241,0.12)"
+                base_size = min(base_size, 8)
+                symbol = "circle"
+                role = "\U0001f464 NORMAL"
 
-            tag = ("🚨 CASHOUT" if node in cashout_set else
-                   "🎯 ORIGIN"  if node == origin_node else
-                   "🔄 RING"    if node in ring_set else "👤 NORMAL")
-            
-            hover = (f"<b>{node}</b><br>Role: {tag}<br>DNA: <b>{dna:.1f}</b><br>Stage: {stage}<br>"
-                     f"Degree: {G.in_degree(node)} in / {G.out_degree(node)} out")
-        else:
-            # Raw Mode
-            color, border = "#1e293b", "#334155"
-            base_size = 10
-            hover = f"<b>{node}</b><br>Raw Node Account<br>In-degree: {G.in_degree(node)}<br>Out-degree: {G.out_degree(node)}"
+            hover = (
+                f"<b>{node}</b><br>"
+                f"Role: {role}<br>"
+                f"Stage: <b>{stage}</b><br>"
+                f"DNA Score: <b>{dna:.1f}</b><br>"
+                f"GNN Structural: <b>{gnn_v*100:.1f}%</b><br>"
+                f"Hybrid Score: {hyb_v:.3f}<br>"
+                f"Out-flow: \u20b9{out_w * inr_rate:,.0f}<br>"
+                f"In-flow:  \u20b9{in_w  * inr_rate:,.0f}<br>"
+                f"Hops to cashout: {hops if hops != -1 else 'N/A'}<br>"
+                f"Degree: {G.in_degree(node)} in / {G.out_degree(node)} out"
+            )
+            n_colors.append(color)
+            n_sizes.append(base_size)
+            n_borders.append(border)
+            n_symbols.append(symbol)
+            n_hover.append(hover)
 
-        n_colors.append(color)
-        n_sizes.append(base_size)
-        n_borders.append(border)
-        n_hover.append(hover)
+        fig.add_trace(go.Scatter(
+            x=nx_pts, y=ny_pts, mode="markers",
+            marker=dict(
+                size=n_sizes, color=n_colors, symbol=n_symbols,
+                line=dict(width=1.4, color=n_borders),
+            ),
+            text=n_hover,
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=False,
+        ))
 
-    fig.add_trace(go.Scatter(
-        x=nx_pos, y=ny_pos, mode="markers",
-        marker=dict(size=n_sizes, color=n_colors, line=dict(width=1.2, color=n_borders)),
-        text=n_hover, hovertemplate="%{text}<extra></extra>", showlegend=False,
-    ))
+        frozen_note = f"  \u2502  \U0001f9ca {len(frozen_set)} frozen" if frozen_set else ""
+        fig.update_layout(
+            paper_bgcolor="#050810",
+            plot_bgcolor="#050810",
+            height=fig_height,
+            title=dict(
+                text=f"FORENSIC LAUNDERING TOPOLOGY \u2014 BFS Topology-Driven Layout{frozen_note}",
+                font=dict(size=9, color="#475569", family="JetBrains Mono"),
+                x=0.01, y=0.99,
+            ),
+            xaxis=dict(
+                showgrid=False, zeroline=False, showticklabels=False,
+                range=[x_min, x_max], fixedrange=False,
+            ),
+            yaxis=dict(
+                showgrid=False, zeroline=False, showticklabels=False,
+                range=[y_min - 0.3, y_max + 1.6], fixedrange=False,
+            ),
+            margin=dict(l=12, r=12, t=44, b=12),
+            annotations=annotations,
+            dragmode="pan",
+            hoverlabel=dict(
+                bgcolor="#0d1520", font_size=11,
+                font_family="JetBrains Mono", font_color="#e2e8f0",
+                align="left",
+            ),
+        )
 
-    # Title Logic
-    title_text = "Graph Intelligence Activated" if intelligence_mode else "Raw Transaction Network (Pre-Intelligence)"
-    
-    fig.update_layout(
-        paper_bgcolor="#050810", plot_bgcolor="#050810",
-        height=520 if not focus_ring else 460,
-        title=dict(text=title_text, font=dict(size=13, color="#64748b"), x=0.01, y=0.98),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        margin=dict(l=10, r=10, t=35, b=10),
-        annotations=annotations,
-        dragmode="pan",
-        hoverlabel=dict(bgcolor="#0d1520", font_size=11, font_family="JetBrains Mono", font_color="#e2e8f0"),
-    )
+    # ═══════════════════════════════════════════════════════════ RAW MODE
+    else:
+        bx, by = _straight_xy(bg_edges)
+        if bx:
+            fig.add_trace(go.Scatter(
+                x=bx, y=by, mode="lines",
+                line=dict(width=0.6, color="rgba(71,85,105,0.22)"),
+                hoverinfo="none", showlegend=False,
+            ))
+
+        n_colors, n_sizes, n_hover, nx_pts, ny_pts = [], [], [], [], []
+        for node in render_nodes:
+            if node not in pos: continue
+            x, y = pos[node]
+            nx_pts.append(x); ny_pts.append(y)
+            out_w = sum(d.get("weight", 0) for _, _, d in G.out_edges(node, data=True))
+            in_w  = sum(d.get("weight", 0) for _, _, d in G.in_edges(node, data=True))
+            deg   = G.degree(node)
+            sz    = max(5, min(18, 5 + deg * 0.5))
+            if node in set(cashout_nodes):
+                clr = "rgba(220,38,38,0.65)"; sz = max(sz, 14)
+            elif node in set(ring_accounts):
+                clr = "rgba(124,58,237,0.55)"; sz = max(sz, 10)
+            else:
+                clr = "rgba(30,58,95,0.60)"
+            hov = (
+                f"<b>{node}</b><br>"
+                f"In: {G.in_degree(node)} / Out: {G.out_degree(node)}<br>"
+                f"Out-flow: \u20b9{out_w * inr_rate:,.0f}<br>"
+                f"In-flow:  \u20b9{in_w  * inr_rate:,.0f}"
+            )
+            n_colors.append(clr); n_sizes.append(sz); n_hover.append(hov)
+
+        fig.add_trace(go.Scatter(
+            x=nx_pts, y=ny_pts, mode="markers",
+            marker=dict(size=n_sizes, color=n_colors,
+                        line=dict(width=0.8, color="rgba(99,102,241,0.20)")),
+            text=n_hover,
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=False,
+        ))
+
+        fig.update_layout(
+            paper_bgcolor="#050810",
+            plot_bgcolor="#050810",
+            height=580,
+            title=dict(
+                text="PRE-INTELLIGENCE TRANSACTION NETWORK \u2014 Spring Layout",
+                font=dict(size=9, color="#475569", family="JetBrains Mono"),
+                x=0.01, y=0.99,
+            ),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            margin=dict(l=12, r=12, t=36, b=12),
+            dragmode="pan",
+            hoverlabel=dict(
+                bgcolor="#0d1520", font_size=11,
+                font_family="JetBrains Mono", font_color="#e2e8f0",
+            ),
+        )
+
     return fig
 
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -556,13 +941,14 @@ hr { border-color:#1a2744; }
 
 def _init():
     defaults = {
-        "sim_result":           None,
-        "analysis":             None,
-        "pred_df":              None,
-        "alerts":               [],
-        "ring_summary":         {},
+        "sim_result":            None,
+        "analysis":              None,
+        "pred_df":               None,
+        "alerts":                [],
+        "ring_summary":          {},
         "intervention":          None,
-        "intervention_out":      None,
+        "intervention_out":      None,        # vel_col alert_engine output
+        "intervention_graph_out": None,       # tab3 graph intervention output
         "last_mode":             None,
         "predicted_exit_ts":     None,
         "ai_intelligence":       None,
@@ -1078,10 +1464,15 @@ with graph_col:
         stage_lookup_g = {}
         if pred_df is not None and not pred_df.empty and "node" in pred_df.columns and "stage_label" in pred_df.columns:
             stage_lookup_g = pred_df.set_index("node")["stage_label"].to_dict()
+        # GNN + hybrid score lookups for layout sorting and visual glow
+        gnn_scores_g    = gnn_layer.get_gnn_scores_dict(dna_df_graph)
+        hybrid_scores_g = gnn_layer.get_hybrid_scores_dict(dna_df_graph)
     else:
-        dna_lookup = {}
-        hop_lookup = {}
-        stage_lookup_g = {}
+        dna_lookup      = {}
+        hop_lookup      = {}
+        stage_lookup_g  = {}
+        gnn_scores_g    = {}
+        hybrid_scores_g = {}
 
     # Phase 6 + 3: cap and warn
     MAX_NODES = 200
@@ -1099,14 +1490,29 @@ with graph_col:
             icon="📊",
         )
 
-    # Phase 1: compute hierarchical layout (cached in session_state by graph size)
+    # Compute hierarchical layout (cached by graph fingerprint + intelligence state)
     if G:
-        layout_key = f"_hier_layout_{G.number_of_nodes()}_{len(ring_accounts)}_{len(cashout_nodes)}"
+        # Include intelligence_mode in key so layout rebuilds when GNN activates
+        layout_key = (
+            f"_hier_layout_bfs_{G.number_of_nodes()}_"
+            f"{len(ring_accounts)}_{len(cashout_nodes)}_{int(intelligence_mode)}"
+        )
         if layout_key not in st.session_state:
-            st.session_state[layout_key] = _hierarchical_layout(G, ring_accounts, cashout_nodes)
+            st.session_state[layout_key] = _hierarchical_layout(
+                G, ring_accounts, cashout_nodes,
+                stage_lookup  = stage_lookup_g,
+                hybrid_scores = hybrid_scores_g,
+            )
         hier_pos = st.session_state[layout_key]
+
+        # Spring layout for raw view (cached separately, no stage info needed)
+        raw_layout_key = f"_spring_layout_{G.number_of_nodes()}"
+        if raw_layout_key not in st.session_state:
+            st.session_state[raw_layout_key] = _spring_layout_raw(G)
+        spring_pos = st.session_state[raw_layout_key]
     else:
-        hier_pos = {} # Default empty if G is None
+        hier_pos   = {}
+        spring_pos = {}
 
     # Phase 5: focus toggle
     focus_opts = ["\U0001f50d Focus: Suspicious Ring", "\U0001f310 Show Full Network"]
@@ -1121,34 +1527,65 @@ with graph_col:
     )
     focus_ring_mode = "Suspicious" in focus_sel
 
-    # Phase 2 & 4: Tabbed Interface
+    # Phase 2 & 4: Run button ABOVE tabs — always visible regardless of active tab
+    if not intelligence_mode:
+        _run_c1, _run_c2 = st.columns([3, 1])
+        with _run_c1:
+            st.warning(
+                "⚠️ Graph intelligence analysis required to unlock forensic mapping.",
+                icon="🔒",
+            )
+        with _run_c2:
+            if st.button(
+                "🔥 RUN GRAPH INTELLIGENCE ANALYSIS",
+                use_container_width=True,
+                type="primary",
+                key="btn_run_intel_main",
+            ):
+                compute_intelligence()
+                st.rerun()
+    else:
+        st.success(
+            "🧠 Graph Intelligence Activated — DNA scores, stage labels, and risk overlays are live.",
+            icon="✅",
+        )
+
     tab1, tab2, tab3 = st.tabs(["🌐 Raw Network", "🧠 Graph Intelligence", "🛡️ Tiered Intervention"])
 
     with tab1:
-        if G:
+        st.markdown("""<div style='font-size:.7rem;color:#475569;margin-bottom:.5rem;'>
+        📊 <b>Pre-Intelligence Raw Network</b> — Spring layout, no DNA overlay.
+        Nodes sized by degree. Run Graph Intelligence to unlock forensic analysis.
+        </div>""", unsafe_allow_html=True)
+        if G and spring_pos:
             fig_raw = _build_forensic_graph(
                 G            = G,
-                pos          = hier_pos,
+                pos          = spring_pos,
                 ring_accounts= ring_accounts,
                 cashout_nodes= cashout_nodes,
                 dna_lookup   = {},
                 stage_lookup = {},
                 hop_lookup   = {},
                 inr_rate     = INR_RATE,
-                intelligence_mode = False
+                intelligence_mode = False,
             )
-            st.plotly_chart(fig_raw, use_container_width=True, config={"displayModeBar": False}, key="fig_raw")
+            st.plotly_chart(fig_raw, use_container_width=True,
+                            config={"displayModeBar": False}, key="fig_raw")
         else:
-            st.info("No graph data available to display.")
+            st.info("Load a dataset or run a simulation to view the raw transaction network.")
 
     with tab2:
         if not intelligence_mode:
-            st.warning("⚠️ Graph intelligence analysis required to unlock forensic mapping.", icon="🔒")
-            if st.button("🔥 RUN GRAPH INTELLIGENCE ANALYSIS", use_container_width=True, type="primary", key="btn_run_intel_tab"):
-                compute_intelligence()
-                st.rerun()
+            st.info(
+                "🔥 Click **RUN GRAPH INTELLIGENCE ANALYSIS** above to unlock the forensic graph overlay.",
+                icon="🧠",
+            )
         else:
             if G:
+                # Pass frozen nodes so the graph renders them in grey
+                _frozen_in_graph = (
+                    st.session_state.get("intervention_graph_out", {}) or {}
+                ).get("stats", {}).get("frozen_nodes", [])
                 fig_intel = _build_forensic_graph(
                     G            = G,
                     pos          = hier_pos,
@@ -1159,80 +1596,178 @@ with graph_col:
                     hop_lookup   = hop_lookup,
                     inr_rate     = INR_RATE,
                     focus_ring   = focus_ring_mode,
-                    intelligence_mode = True
+                    intelligence_mode = True,
+                    frozen_nodes = _frozen_in_graph,
+                    gnn_scores   = gnn_scores_g,
+                    hybrid_scores= hybrid_scores_g,
                 )
-                st.plotly_chart(fig_intel, use_container_width=True, config={"displayModeBar": False}, key="fig_intel")
+                st.plotly_chart(fig_intel, use_container_width=True,
+                                config={"displayModeBar": False}, key="fig_intel")
             else:
                 st.info("No graph data available for intelligence display.")
 
     with tab3:
         if not intelligence_mode:
-             st.warning("⚠️ Intelligence analysis must be run before applying interventions.", icon="🔒")
+            st.warning("⚠️ Intelligence analysis must be run before applying interventions.", icon="🔒")
+        elif not ring_accounts:
+            st.info("🛡️ No suspicious ring detected in this dataset.\n\nFreeze controls are disabled.", icon="✅")
         else:
+            # -- Buttons
             _int_col1, _int_col2 = st.columns([2, 1])
+            _already_frozen = bool(st.session_state.get("intervention_graph_out"))
             with _int_col1:
                 st.caption("🛡️ ACTIVE MITIGATION CONTROLS")
-                _btn_ring = st.button("🔴 FREEZE SUSPICIOUS RING", use_container_width=True, help="Tiered freeze for all ring nodes.")
-                _btn_origin = st.button("🟠 ISOLATE ORIGIN ACCOUNT", use_container_width=True, help="Isolate the source node.")
-            
-            # Apply logic
+                _btn_ring = st.button(
+                    "🔴 FREEZE SUSPICIOUS RING",
+                    use_container_width=True,
+                    help="Tiered freeze: HIGH risk nodes frozen, MEDIUM flagged for KYC.",
+                    disabled=_already_frozen,
+                )
+                _btn_origin = st.button(
+                    "🟠 ISOLATE ORIGIN ACCOUNT",
+                    use_container_width=True,
+                    help="Apply freeze only to origin node.",
+                    disabled=_already_frozen,
+                )
+                if _already_frozen:
+                    if st.button("🔄 Reset Intervention", use_container_width=True):
+                        st.session_state.intervention_graph_out = None
+                        st.rerun()
+            with _int_col2:
+                st.markdown("""<div style='background:#080f1e;border:1px solid #1a2744;
+                border-radius:8px;padding:.7rem;font-size:.65rem;color:#64748b;'>
+                <b style='color:#e2e8f0;'>Tier Logic</b><br><br>
+                🧊 <b style='color:#ef4444;'>HIGH</b> — Exit Imminent / Pre-Cashout<br>&nbsp;&nbsp;Edges removed<br><br>
+                🟡 <b style='color:#eab308;'>MEDIUM</b> — Layering / Compromised<br>&nbsp;&nbsp;KYC Flagged<br><br>
+                ✅ <b style='color:#22c55e;'>LOW</b> — Normal<br>&nbsp;&nbsp;Approved
+                </div>""", unsafe_allow_html=True)
+
+            # -- Apply intervention logic
             if _btn_ring or _btn_origin:
                 targets = ring_accounts if _btn_ring else ring_accounts[:1]
-                # Re-build graph from transactions to ensure clean state
-                work_G = dna_engine.build_graph(transactions)
-                # Inject DNA scores into node attributes for engine
-                for n in work_G.nodes():
-                    work_G.nodes[n]["dna_score"] = dna_lookup.get(n, 0)
-                
-                out = intervention_engine.apply_intervention(work_G, targets)
-                # Recompute metrics for Post-Intervention Graph
-                int_analysis = dna_engine.analyse({"transactions": transactions, "cashout_nodes": cashout_nodes})
-                # Patch the graph in analysis with frozen one
-                int_analysis["graph"] = work_G
-                st.session_state.intervention_out = {
-                    "analysis": int_analysis,
-                    "stats": out,
-                    "loss_avoided": intervention_engine.calculate_loss_avoided(pred_df, out["frozen_nodes"])
-                }
-                st.toast(f"✅ Intervention Applied: {len(out['frozen_nodes'])} nodes frozen.", icon="🛡️")
 
-            # Render post-intervention graph
-            i_out = st.session_state.get("intervention_out")
-            if i_out:
-                i_analysis = i_out["analysis"]
-                i_stats = i_out["stats"]
-                
-                # Highlight frozen nodes in graph lookup
-                i_dna_lookup = dna_lookup.copy()
-                for n in i_stats["frozen_nodes"]: i_dna_lookup[n] = 0 # Grey out
-                
-                fig_post = _build_forensic_graph(
-                    G            = i_analysis["graph"],
-                    pos          = hier_pos,
-                    ring_accounts= ring_accounts,
-                    cashout_nodes= cashout_nodes,
-                    dna_lookup   = i_dna_lookup,
+                # Fresh copy of graph so we don't mutate the cached one
+                work_G = dna_engine.build_graph(transactions)
+
+                # Use actual edge-weight-based loss calculation
+                out = intervention_engine.apply_intervention(
+                    work_G,
+                    targets,
+                    dna_lookup   = dna_lookup,
                     stage_lookup = stage_lookup_g,
-                    hop_lookup   = hop_lookup,
-                    inr_rate     = INR_RATE,
-                    intelligence_mode = True
+                    cashout_nodes= cashout_nodes,
                 )
-                st.plotly_chart(fig_post, use_container_width=True, config={"displayModeBar": False}, key="fig_post")
-                
-                st.success(f"🛡️ **Projected Loss Avoided: ₹{i_out['loss_avoided'] * INR_RATE:,.0f}**", icon="📈")
-                st.info(f"Nodes: {len(i_stats['frozen_nodes'])} Frozen (High Risk), {len(i_stats['kyc_nodes'])} KYC Required (Medium Risk)")
+
+                # Recompute post-intervention analysis
+                try:
+                    int_analysis = dna_engine.analyse(
+                        {"transactions": transactions, "cashout_nodes": cashout_nodes}
+                    )
+                except Exception:
+                    int_analysis = analysis
+                int_analysis["graph"] = work_G
+
+                # Prefer edge-weight loss; fallback to heuristic if 0
+                _edge_loss = out.get("loss_avoided_usd", 0.0)
+                _heuri_loss = intervention_engine.calculate_loss_avoided(
+                    pred_df, out.get("frozen_nodes", [])
+                )
+                _final_loss = _edge_loss if _edge_loss > 0 else _heuri_loss
+
+                st.session_state.intervention_graph_out = {
+                    "analysis":    int_analysis,
+                    "stats":       out,
+                    "loss_avoided": _final_loss,
+                }
+                _n_frozen = len(out.get("frozen_nodes", []))
+                _n_kyc    = len(out.get("kyc_nodes",    []))
+                _n_appr   = len(out.get("approved_nodes", []))
+                if _n_frozen > 0 or _n_kyc > 0:
+                    st.toast(
+                        f"✅ {_n_frozen} frozen · {_n_kyc} KYC · {_n_appr} approved",
+                        icon="🛡️",
+                    )
+                else:
+                    st.toast("No high/medium risk nodes found in target set.", icon="ℹ️")
+                st.rerun()
+
+            # -- Render post-intervention state
+            i_out = st.session_state.get("intervention_graph_out")
+            if i_out:
+                i_analysis  = i_out["analysis"]
+                i_stats     = i_out["stats"]
+                frozen_list = i_stats.get("frozen_nodes", [])
+                kyc_list    = i_stats.get("kyc_nodes",    [])
+                appr_list   = i_stats.get("approved_nodes", [])
+                edges_rm    = i_stats.get("edges_removed", 0)
+
+                # Show tier explanation if no HIGH-risk nodes
+                if not frozen_list and kyc_list:
+                    st.warning(
+                        "⚠️ No HIGH-risk nodes (Exit Imminent / Pre-Cashout) found in target.\n\n"
+                        f"{len(kyc_list)} node(s) flagged for KYC (MEDIUM risk). "
+                        "No edges removed.",
+                        icon="🟡",
+                    )
+                elif not frozen_list and not kyc_list:
+                    st.info(
+                        "✅ All target nodes are LOW risk (Normal stage). No action required.",
+                        icon="🛡️",
+                    )
+
+                # Post-intervention graph with frozen nodes greyed
+                i_dna_lookup = dna_lookup.copy()
+                for n in frozen_list:
+                    i_dna_lookup[n] = 0
+
+                if i_analysis and i_analysis.get("graph"):
+                    fig_post = _build_forensic_graph(
+                        G             = i_analysis["graph"],
+                        pos           = hier_pos,
+                        ring_accounts = ring_accounts,
+                        cashout_nodes = cashout_nodes,
+                        dna_lookup    = i_dna_lookup,
+                        stage_lookup  = stage_lookup_g,
+                        hop_lookup    = hop_lookup,
+                        inr_rate      = INR_RATE,
+                        intelligence_mode = True,
+                        frozen_nodes  = frozen_list,
+                        gnn_scores    = gnn_scores_g,
+                        hybrid_scores = hybrid_scores_g,
+                    )
+                    st.plotly_chart(fig_post, use_container_width=True,
+                                    config={"displayModeBar": False}, key="fig_post")
+
+                # Metrics
+                _loss_usd = i_out.get("loss_avoided", 0.0)
+                _loss_inr = _loss_usd * INR_RATE
+                st.success(
+                    f"🛡️ **Projected Loss Avoided: ₹{_loss_inr:,.0f}** "
+                    f"({edges_rm} transaction edges severed)",
+                    icon="📈",
+                )
+                st.info(
+                    f"Nodes: **{len(frozen_list)}** Frozen (High Risk) │ "
+                    f"**{len(kyc_list)}** KYC Required (Medium Risk) │ "
+                    f"**{len(appr_list)}** Approved (Low Risk)"
+                )
             else:
                 st.info("Select an intervention strategy above to visualize the post-mitigation state.")
-        st.markdown("""
-        <div style='display:flex;gap:1.6rem;font-size:.67rem;color:#475569;margin-top:-.5rem;
-                    flex-wrap:wrap;'>
-            <span>● <span style='color:#ef4444;'>●</span> Cashout sink</span>
-            <span>● <span style='color:#3b82f6;'>●</span> Origin node</span>
-            <span>● <span style='color:#f97316;'>●</span> High-risk ring (DNA≥28)</span>
-            <span>● <span style='color:#eab308;'>●</span> Mid-ring</span>
-            <span>● <span style='color:#475569;'>●</span> Normal node</span>
-            <span>▶ Arrow = tx direction &nbsp;·&nbsp; Size ∝ DNA score &nbsp;·&nbsp; Labels = top amounts</span>
-        </div>""", unsafe_allow_html=True)
+
+    # Graph legend (outside tabs — always visible)
+    st.markdown("""
+    <div style='display:flex;gap:1.4rem;font-size:.66rem;color:#475569;margin-top:.3rem;flex-wrap:wrap;'>
+        <span>&#9670; <span style='color:#ef4444;'>&#9670;</span> Cashout (diamond)</span>
+        <span>&#9733; <span style='color:#3b82f6;'>&#9733;</span> Origin (star)</span>
+        <span>&#9679; <span style='color:#dc2626;'>&#9679;</span> Exit Imminent</span>
+        <span>&#9679; <span style='color:#f97316;'>&#9679;</span> Layering</span>
+        <span>&#9679; <span style='color:#eab308;'>&#9679;</span> Compromised</span>
+        <span>&#215; <span style='color:#6b7280;'>&#215;</span> Frozen</span>
+        <span><span style='color:#a855f7;'>&#9675;</span> GNN Anom. Glow</span>
+        <span>&#9658; Bold red = critical path &nbsp;&middot;&nbsp; Curved = long-hop &nbsp;&middot;&nbsp; Size &#8733; DNA</span>
+    </div>""", unsafe_allow_html=True)
+
+
 
 with alert_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>LIVE ALERT FEED</div>',
@@ -1368,14 +1903,15 @@ with dna_col:
         top = analysis["top_risks"].iloc[0]
     
     if top is not None:
-        gnn_score = top.get("gnn_risk_score", 0.0)
-        gnn_pct = gnn_score * 100
-        
+        _gnn_raw = top.get("gnn_risk_score", None)
+        gnn_score = float(_gnn_raw) if _gnn_raw is not None else (float(top.get("dna_score", 0)) / 100.0)
+        gnn_pct = min(gnn_score * 100, 100.0)
+
         st.markdown(f"""
         <div style='font-size:.68rem;color:#475569;margin-bottom:.5rem;font-family:monospace;'>
             Node: <span style='color:#e2e8f0;'>{top['node']}</span>
             &nbsp;|&nbsp; DNA: <span style='color:#ef4444;font-weight:700;'>{top['dna_score']:.1f}</span>
-            &nbsp;|&nbsp; GNN Conf: <span style='color:[#a855f7];font-weight:700;'>{gnn_pct:.1f}%</span>
+            &nbsp;|&nbsp; GNN Conf: <span style='color:#a855f7;font-weight:700;'>{gnn_pct:.1f}%</span>
         </div>""", unsafe_allow_html=True)
 
         bars = [
@@ -1400,7 +1936,7 @@ with dna_col:
                 </div>
             </div>""", unsafe_allow_html=True)
             
-        # Display GNN Specific Status and Score Bar
+        # GNN confidence bar
         st.markdown(f"""
         <div style='margin-top:.8rem;border-top:1px solid #1a2744;padding-top:.8rem;'>
             <div style='display:flex;justify-content:space-between;font-size:.62rem;margin-bottom:.3rem;'>
@@ -1408,7 +1944,7 @@ with dna_col:
                 <span style='color:#818cf8;font-family:monospace;'>{gnn_pct:.1f}%</span>
             </div>
             <div style='height:3px;background:rgba(129,140,248,0.1);border-radius:2px;'>
-                <div style='height:100%;width:{gnn_pct}%;background:#818cf8;border-radius:2px;'></div>
+                <div style='height:100%;width:{min(gnn_pct, 100):.1f}%;background:#818cf8;border-radius:2px;'></div>
             </div>
             <div style='font-size:.55rem;color:#334155;margin-top:.4rem;'>
                 {gnn_layer.get_gnn_status()}
@@ -1420,7 +1956,7 @@ with dna_col:
 with gauge_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>RISK GAUGE</div>',
                 unsafe_allow_html=True)
-    rs = summary["max_dna_score"]
+    rs = float(summary.get("max_dna_score", 0.0))
     bar_color = "#ef4444" if rs >= 70 else "#f97316" if rs >= 50 else "#22c55e"
     fig_g2 = go.Figure(go.Indicator(
         mode="gauge+number+delta",
@@ -1499,33 +2035,40 @@ vel_col, int_col = st.columns([2.4, 1.6], gap="medium")
 with vel_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>TRANSACTION VELOCITY TIME-SERIES</div>',
                 unsafe_allow_html=True)
-    tx = transactions.copy()
-    tx["bucket"] = tx["timestamp"].dt.floor("5min")
-    vdf = tx.groupby(["bucket","is_suspicious"]).size().reset_index(name="n")
-    norm_v  = vdf[~vdf["is_suspicious"]].set_index("bucket")["n"]
-    ring_v  = vdf[ vdf["is_suspicious"]].set_index("bucket")["n"]
+    try:
+        tx = transactions.copy()
+        tx["bucket"] = tx["timestamp"].dt.floor("5min")
+        # Guard: ensure is_suspicious column exists before groupby
+        if "is_suspicious" not in tx.columns:
+            tx["is_suspicious"] = False
+        tx["is_suspicious"] = tx["is_suspicious"].fillna(False).astype(bool)
+        vdf = tx.groupby(["bucket", "is_suspicious"]).size().reset_index(name="n")
+        norm_v  = vdf[~vdf["is_suspicious"]].set_index("bucket")["n"]
+        ring_v  = vdf[ vdf["is_suspicious"]].set_index("bucket")["n"]
 
-    fv = go.Figure()
-    fv.add_trace(go.Scatter(x=norm_v.index, y=norm_v.values, name="Normal",
-                            mode="lines", line=dict(color="#3b82f6", width=1.5),
-                            fill="tozeroy", fillcolor="rgba(59,130,246,.05)"))
-    if is_attack and not ring_v.empty:
-        fv.add_trace(go.Scatter(x=ring_v.index, y=ring_v.values, name="Ring/Suspicious",
-                                mode="lines+markers", line=dict(color="#ef4444", width=2),
-                                marker=dict(size=5, color="#ef4444"),
-                                fill="tozeroy", fillcolor="rgba(239,68,68,.08)"))
-    fv.update_layout(
-        paper_bgcolor="#050810", plot_bgcolor="#050810", height=240,
-        font=dict(family="Inter", color="#64748b", size=10),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-        xaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False),
-        yaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False,
-                   title="Tx / 5 min"),
-        margin=dict(l=45, r=15, t=8, b=35),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="#0d1520", font_size=10),
-    )
-    st.plotly_chart(fv, use_container_width=True, config={"displayModeBar": False})
+        fv = go.Figure()
+        fv.add_trace(go.Scatter(x=norm_v.index, y=norm_v.values, name="Normal",
+                                mode="lines", line=dict(color="#3b82f6", width=1.5),
+                                fill="tozeroy", fillcolor="rgba(59,130,246,.05)"))
+        if is_attack and not ring_v.empty:
+            fv.add_trace(go.Scatter(x=ring_v.index, y=ring_v.values, name="Ring/Suspicious",
+                                    mode="lines+markers", line=dict(color="#ef4444", width=2),
+                                    marker=dict(size=5, color="#ef4444"),
+                                    fill="tozeroy", fillcolor="rgba(239,68,68,.08)"))
+        fv.update_layout(
+            paper_bgcolor="#050810", plot_bgcolor="#050810", height=240,
+            font=dict(family="Inter", color="#64748b", size=10),
+            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+            xaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False),
+            yaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False,
+                       title="Tx / 5 min"),
+            margin=dict(l=45, r=15, t=8, b=35),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#0d1520", font_size=10),
+        )
+        st.plotly_chart(fv, use_container_width=True, config={"displayModeBar": False})
+    except Exception as _vel_err:
+        st.warning(f"⚠️ Velocity chart could not be rendered: {str(_vel_err)[:80]}")
 
 with int_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>INTERVENTION SIMULATION</div>',
@@ -1549,7 +2092,10 @@ with int_col:
                     "monitor_only", ring_summary, transactions, ring_accounts)
 
         out = st.session_state.intervention_out
-        if out:
+        # Guard: intervention_out (vel_col) holds alert_engine output {total_at_risk, ...}
+        # intervention_graph_out (tab3) holds graph engine output {analysis, stats, ...}
+        # Only render if it's the right shape.
+        if out and isinstance(out, dict) and "total_at_risk" in out:
             labels = {"freeze_ring":   ("❄️ Full Ring Freeze", "#3b82f6"),
                       "freeze_origin": ("🧊 Origin Freeze",   "#f97316"),
                       "monitor_only":  ("👁 Monitor Only",     "#eab308")}
@@ -1803,25 +2349,35 @@ st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>TOP RISK NODES �
 
 if intelligence_mode and not pred_df.empty:
     display_cols = [
-        "node","dna_score","risk_level","stage_label",
-        "fan_out_ratio","velocity_score","burst_score",
-        "hops_to_cashout","cashout_probability","time_to_cashout_min",
+        "node", "dna_score", "risk_level", "stage_label",
+        "gnn_score", "hybrid_score",
+        "fan_out_ratio", "velocity_score", "burst_score",
+        "hops_to_cashout", "cashout_probability", "time_to_cashout_min",
     ]
     # Filter only available columns to prevent KeyError
     valid_cols = [c for c in display_cols if c in pred_df.columns]
     top_tbl = pred_df[valid_cols].head(15).copy()
-    
+
+    col_cfg = {
+        "dna_score":          st.column_config.NumberColumn(label="DNA Score",   format="%.1f"),
+        "cashout_probability": st.column_config.ProgressColumn(
+                               label="Cashout %", format="%.1f%%", min_value=0, max_value=100),
+        "time_to_cashout_min": st.column_config.NumberColumn(label="ETA (min)",  format="%.0f"),
+    }
+    if "gnn_score" in valid_cols:
+        col_cfg["gnn_score"]    = st.column_config.ProgressColumn(
+            label="\U0001f9e0 GNN Score", format="%.3f", min_value=0.0, max_value=1.0)
+    if "hybrid_score" in valid_cols:
+        col_cfg["hybrid_score"] = st.column_config.ProgressColumn(
+            label="Hybrid", format="%.3f", min_value=0.0, max_value=1.0)
+
     st.dataframe(
         top_tbl,
         use_container_width=True,
         height=380,
-        column_config={
-            "dna_score":  st.column_config.NumberColumn(label="DNA Score", format="%.1f"),
-            "cashout_probability":  st.column_config.ProgressColumn(
-                label="Cashout %", format="%.1f%%", min_value=0, max_value=100),
-            "time_to_cashout_min":  st.column_config.NumberColumn(label="ETA (min)", format="%.0f"),
-        },
+        column_config=col_cfg,
     )
+
 else:
     st.info("Top risk intelligence table will populate after analysis.")
 
@@ -1902,7 +2458,6 @@ st.markdown("<hr>", unsafe_allow_html=True)
 # IMMUTABLE AUDIT ANCHOR — Blockchain Proof of Detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("<hr>", unsafe_allow_html=True)
 st.markdown("""
 <div class="sec-hdr"><span class="sec-dot"></span>IMMUTABLE AUDIT ANCHOR — BLOCKCHAIN PROOF OF DETECTION</div>
 """, unsafe_allow_html=True)
@@ -1910,9 +2465,9 @@ st.markdown("""
 
 _top_dna_score = float(pred_df["dna_score"].max()) if (intelligence_mode and not pred_df.empty and "dna_score" in pred_df.columns) else 0.0
 
-# Phase 3: always read stage from session_state (set by run_pipeline) — single source of truth
-_top_stage = st.session_state.get("current_stage",
-                ring_summary.get("dominant_label", "Normal"))
+# Always read stage from session_state — single source of truth
+_top_stage = str(st.session_state.get("current_stage") or
+                 ring_summary.get("dominant_label", "Normal"))
 
 # Phase 4: full PQC tier vocabulary — 4 tiers, no truncation
 if _top_dna_score >= 35 or _top_stage == "Exit Imminent":

@@ -556,13 +556,14 @@ hr { border-color:#1a2744; }
 
 def _init():
     defaults = {
-        "sim_result":           None,
-        "analysis":             None,
-        "pred_df":              None,
-        "alerts":               [],
-        "ring_summary":         {},
+        "sim_result":            None,
+        "analysis":              None,
+        "pred_df":               None,
+        "alerts":                [],
+        "ring_summary":          {},
         "intervention":          None,
-        "intervention_out":      None,
+        "intervention_out":      None,        # used by vel_col intervention section
+        "intervention_graph_out": None,       # used by tab3 graph intervention
         "last_mode":             None,
         "predicted_exit_ts":     None,
         "ai_intelligence":       None,
@@ -667,6 +668,7 @@ def compute_intelligence():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # ── UNPACK SESSION DATA ─────────────────────────────────────────────────────────
 result       = st.session_state.sim_result
 analysis     = st.session_state.analysis
@@ -678,19 +680,26 @@ intelligence_mode = is_analyzed
 
 # Safe defaults if intelligence not yet run
 if is_analyzed and analysis:
-    summary = analysis["summary"]
-    G       = analysis["graph"]
+    summary = analysis.get("summary") or {}
+    G       = analysis.get("graph")
 elif result:
-    import dna_engine
-    G = dna_engine.build_graph(result["transactions"])
+    import dna_engine as _dna_eng
+    try:
+        G = _dna_eng.build_graph(result["transactions"])
+    except Exception:
+        G = None
     summary = {
         "max_dna_score": 0.0, "n_critical": 0, "n_clusters": 0,
-        "total_nodes": G.number_of_nodes(), "total_edges": G.number_of_edges(),
+        "total_nodes": G.number_of_nodes() if G else 0,
+        "total_edges": G.number_of_edges() if G else 0,
         "avg_dna_score": 0.0
     }
 else:
     G = None
-    summary = {}
+    summary = {
+        "max_dna_score": 0.0, "n_critical": 0, "n_clusters": 0,
+        "total_nodes": 0, "total_edges": 0, "avg_dna_score": 0.0
+    }
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -763,7 +772,8 @@ with st.sidebar:
             _stage_pdf  = st.session_state.get("current_stage", "N/A")
             _dna_pdf    = report.get("summary", {}).get("max_dna_score", 0)
             _prob_pdf   = report.get("ring_summary", {}).get("max_cashout_probability", 0)
-            _hash_pdf   = (st.session_state.anchor_result or {}).get("alert_hash", "Not Anchored")
+            _raw_hash   = (st.session_state.anchor_result or {}).get("alert_hash", "")
+            _hash_pdf   = (_raw_hash[:48] + "...") if len(_raw_hash) > 48 else (_raw_hash or "Not Anchored")
             _ai_pdf     = (st.session_state.ai_intelligence or {})
             _pdf_html   = f"""
 <!DOCTYPE html><html><head>
@@ -836,6 +846,7 @@ with st.sidebar:
 
 _now_str = datetime.now(timezone.utc).strftime("%d %b %Y  %H:%M UTC")
 _raw_mode = st.session_state.get("last_mode")
+# Guard: .upper() only called on confirmed non-empty string
 _mode_lbl = _raw_mode.upper() if isinstance(_raw_mode, str) and _raw_mode.strip() else "STANDBY"
 _mode_color = "#ef4444" if _mode_lbl == "ATTACK" else "#f97316" if _mode_lbl == "DATASET" else "#3b82f6"
 st.markdown(f"""
@@ -933,20 +944,25 @@ else:
     ttc_display, remaining = "N/A", -1
 
 cashout_prob = ring_summary.get("max_cashout_probability", 0)
+_max_dna = summary.get("max_dna_score", 0.0)
+_n_critical = summary.get("n_critical", 0)
+_n_clusters = summary.get("n_clusters", 0)
+_total_nodes = summary.get("total_nodes", 0)
+_total_edges = summary.get("total_edges", 0)
 
-_kpi(k1, "Max DNA Score",  f"{summary['max_dna_score']:.0f}",
+_kpi(k1, "Max DNA Score",  f"{_max_dna:.0f}",
      "/ 100 threat level", "red",    "linear-gradient(90deg,#ef4444,#f97316)")
-_kpi(k2, "Critical Nodes", str(summary["n_critical"]),
+_kpi(k2, "Critical Nodes", str(_n_critical),
      "critical risk nodes", "orange", "linear-gradient(90deg,#f97316,#eab308)")
-_kpi(k3, "Ring Clusters",  str(summary["n_clusters"]),
+_kpi(k3, "Ring Clusters",  str(_n_clusters),
      "suspicious clusters", "purple", "linear-gradient(90deg,#a855f7,#6366f1)")
 _kpi(k4, "Time to Cashout", ttc_display,
      "from now (live)",     "red",    "linear-gradient(90deg,#ef4444,#dc2626)")
 _kpi(k5, "Cashout Prob",   f"{cashout_prob:.0f}%",
      ring_summary.get("dominant_label","Normal"), "cyan",
      "linear-gradient(90deg,#3b82f6,#06b6d4)")
-_kpi(k6, "Total Nodes",    str(summary["total_nodes"]),
-     f"{summary['total_edges']} edges", "slate",
+_kpi(k6, "Total Nodes",    str(_total_nodes),
+     f"{_total_edges} edges", "slate",
      "linear-gradient(90deg,#475569,#334155)")
 
 st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
@@ -1182,29 +1198,41 @@ with graph_col:
                 # Inject DNA scores into node attributes for engine
                 for n in work_G.nodes():
                     work_G.nodes[n]["dna_score"] = dna_lookup.get(n, 0)
-                
-                out = intervention_engine.apply_intervention(work_G, targets)
+
+                out = intervention_engine.apply_intervention(
+                    work_G, targets, dna_lookup=dna_lookup
+                )
                 # Recompute metrics for Post-Intervention Graph
-                int_analysis = dna_engine.analyse({"transactions": transactions, "cashout_nodes": cashout_nodes})
+                try:
+                    int_analysis = dna_engine.analyse(
+                        {"transactions": transactions, "cashout_nodes": cashout_nodes}
+                    )
+                except Exception:
+                    int_analysis = analysis  # fall back to pre-intervention analysis
                 # Patch the graph in analysis with frozen one
                 int_analysis["graph"] = work_G
-                st.session_state.intervention_out = {
+                _loss_avoided = intervention_engine.calculate_loss_avoided(
+                    pred_df, out.get("frozen_nodes", [])
+                )
+                st.session_state.intervention_graph_out = {
                     "analysis": int_analysis,
                     "stats": out,
-                    "loss_avoided": intervention_engine.calculate_loss_avoided(pred_df, out["frozen_nodes"])
+                    "loss_avoided": _loss_avoided,
                 }
-                st.toast(f"✅ Intervention Applied: {len(out['frozen_nodes'])} nodes frozen.", icon="🛡️")
+                st.toast(f"✅ Intervention Applied: {len(out.get('frozen_nodes', []))} frozen, "
+                         f"{len(out.get('kyc_nodes', []))} KYC required.", icon="🛡️")
 
             # Render post-intervention graph
-            i_out = st.session_state.get("intervention_out")
+            i_out = st.session_state.get("intervention_graph_out")
             if i_out:
                 i_analysis = i_out["analysis"]
                 i_stats = i_out["stats"]
-                
+
                 # Highlight frozen nodes in graph lookup
                 i_dna_lookup = dna_lookup.copy()
-                for n in i_stats["frozen_nodes"]: i_dna_lookup[n] = 0 # Grey out
-                
+                for n in i_stats.get("frozen_nodes", []):
+                    i_dna_lookup[n] = 0  # grey out frozen nodes
+
                 fig_post = _build_forensic_graph(
                     G            = i_analysis["graph"],
                     pos          = hier_pos,
@@ -1217,9 +1245,13 @@ with graph_col:
                     intelligence_mode = True
                 )
                 st.plotly_chart(fig_post, use_container_width=True, config={"displayModeBar": False}, key="fig_post")
-                
-                st.success(f"🛡️ **Projected Loss Avoided: ₹{i_out['loss_avoided'] * INR_RATE:,.0f}**", icon="📈")
-                st.info(f"Nodes: {len(i_stats['frozen_nodes'])} Frozen (High Risk), {len(i_stats['kyc_nodes'])} KYC Required (Medium Risk)")
+
+                _loss_inr = i_out.get("loss_avoided", 0) * INR_RATE
+                st.success(f"🛡️ **Projected Loss Avoided: ₹{_loss_inr:,.0f}**", icon="📈")
+                _frozen_ct = len(i_stats.get("frozen_nodes", []))
+                _kyc_ct    = len(i_stats.get("kyc_nodes", []))
+                _approved_ct = len(i_stats.get("approved_nodes", []))
+                st.info(f"Nodes: {_frozen_ct} Frozen (High Risk) │ {_kyc_ct} KYC Required (Medium Risk) │ {_approved_ct} Approved (Low Risk)")
             else:
                 st.info("Select an intervention strategy above to visualize the post-mitigation state.")
         else:
@@ -1367,16 +1399,18 @@ with dna_col:
     top = None
     if intelligence_mode and analysis and not analysis["top_risks"].empty:
         top = analysis["top_risks"].iloc[0]
-    
+
     if top is not None:
-        gnn_score = top.get("gnn_risk_score", 0.0)
-        gnn_pct = gnn_score * 100
+        _gnn_raw = top.get("gnn_risk_score", None)
+        gnn_score = float(_gnn_raw) if _gnn_raw is not None else (float(top.get("dna_score", 0)) / 100.0)
+        gnn_pct = min(gnn_score * 100, 100.0)
         
+        # GNN confidence header line — fixed CSS color syntax
         st.markdown(f"""
         <div style='font-size:.68rem;color:#475569;margin-bottom:.5rem;font-family:monospace;'>
             Node: <span style='color:#e2e8f0;'>{top['node']}</span>
             &nbsp;|&nbsp; DNA: <span style='color:#ef4444;font-weight:700;'>{top['dna_score']:.1f}</span>
-            &nbsp;|&nbsp; GNN Conf: <span style='color:[#a855f7];font-weight:700;'>{gnn_pct:.1f}%</span>
+            &nbsp;|&nbsp; GNN Conf: <span style='color:#a855f7;font-weight:700;'>{gnn_pct:.1f}%</span>
         </div>""", unsafe_allow_html=True)
 
         bars = [
@@ -1401,7 +1435,7 @@ with dna_col:
                 </div>
             </div>""", unsafe_allow_html=True)
             
-        # Display GNN Specific Status and Score Bar
+        # GNN confidence bar
         st.markdown(f"""
         <div style='margin-top:.8rem;border-top:1px solid #1a2744;padding-top:.8rem;'>
             <div style='display:flex;justify-content:space-between;font-size:.62rem;margin-bottom:.3rem;'>
@@ -1409,7 +1443,7 @@ with dna_col:
                 <span style='color:#818cf8;font-family:monospace;'>{gnn_pct:.1f}%</span>
             </div>
             <div style='height:3px;background:rgba(129,140,248,0.1);border-radius:2px;'>
-                <div style='height:100%;width:{gnn_pct}%;background:#818cf8;border-radius:2px;'></div>
+                <div style='height:100%;width:{min(gnn_pct, 100):.1f}%;background:#818cf8;border-radius:2px;'></div>
             </div>
             <div style='font-size:.55rem;color:#334155;margin-top:.4rem;'>
                 {gnn_layer.get_gnn_status()}
@@ -1421,7 +1455,7 @@ with dna_col:
 with gauge_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>RISK GAUGE</div>',
                 unsafe_allow_html=True)
-    rs = summary["max_dna_score"]
+    rs = float(summary.get("max_dna_score", 0.0))
     bar_color = "#ef4444" if rs >= 70 else "#f97316" if rs >= 50 else "#22c55e"
     fig_g2 = go.Figure(go.Indicator(
         mode="gauge+number+delta",
@@ -1500,33 +1534,41 @@ vel_col, int_col = st.columns([2.4, 1.6], gap="medium")
 with vel_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>TRANSACTION VELOCITY TIME-SERIES</div>',
                 unsafe_allow_html=True)
-    tx = transactions.copy()
-    tx["bucket"] = tx["timestamp"].dt.floor("5min")
-    vdf = tx.groupby(["bucket","is_suspicious"]).size().reset_index(name="n")
-    norm_v  = vdf[~vdf["is_suspicious"]].set_index("bucket")["n"]
-    ring_v  = vdf[ vdf["is_suspicious"]].set_index("bucket")["n"]
+    try:
+        tx = transactions.copy()
+        tx["bucket"] = tx["timestamp"].dt.floor("5min")
+        # Guard: ensure is_suspicious column exists before groupby
+        if "is_suspicious" not in tx.columns:
+            tx["is_suspicious"] = False
+        # Fill NaN so booleans are reliable
+        tx["is_suspicious"] = tx["is_suspicious"].fillna(False).astype(bool)
+        vdf = tx.groupby(["bucket", "is_suspicious"]).size().reset_index(name="n")
+        norm_v  = vdf[~vdf["is_suspicious"]].set_index("bucket")["n"]
+        ring_v  = vdf[ vdf["is_suspicious"]].set_index("bucket")["n"]
 
-    fv = go.Figure()
-    fv.add_trace(go.Scatter(x=norm_v.index, y=norm_v.values, name="Normal",
-                            mode="lines", line=dict(color="#3b82f6", width=1.5),
-                            fill="tozeroy", fillcolor="rgba(59,130,246,.05)"))
-    if is_attack and not ring_v.empty:
-        fv.add_trace(go.Scatter(x=ring_v.index, y=ring_v.values, name="Ring/Suspicious",
-                                mode="lines+markers", line=dict(color="#ef4444", width=2),
-                                marker=dict(size=5, color="#ef4444"),
-                                fill="tozeroy", fillcolor="rgba(239,68,68,.08)"))
-    fv.update_layout(
-        paper_bgcolor="#050810", plot_bgcolor="#050810", height=240,
-        font=dict(family="Inter", color="#64748b", size=10),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-        xaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False),
-        yaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False,
-                   title="Tx / 5 min"),
-        margin=dict(l=45, r=15, t=8, b=35),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="#0d1520", font_size=10),
-    )
-    st.plotly_chart(fv, use_container_width=True, config={"displayModeBar": False})
+        fv = go.Figure()
+        fv.add_trace(go.Scatter(x=norm_v.index, y=norm_v.values, name="Normal",
+                                mode="lines", line=dict(color="#3b82f6", width=1.5),
+                                fill="tozeroy", fillcolor="rgba(59,130,246,.05)"))
+        if is_attack and not ring_v.empty:
+            fv.add_trace(go.Scatter(x=ring_v.index, y=ring_v.values, name="Ring/Suspicious",
+                                    mode="lines+markers", line=dict(color="#ef4444", width=2),
+                                    marker=dict(size=5, color="#ef4444"),
+                                    fill="tozeroy", fillcolor="rgba(239,68,68,.08)"))
+        fv.update_layout(
+            paper_bgcolor="#050810", plot_bgcolor="#050810", height=240,
+            font=dict(family="Inter", color="#64748b", size=10),
+            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+            xaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False),
+            yaxis=dict(showgrid=True, gridcolor="#1a2744", zeroline=False,
+                       title="Tx / 5 min"),
+            margin=dict(l=45, r=15, t=8, b=35),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#0d1520", font_size=10),
+        )
+        st.plotly_chart(fv, use_container_width=True, config={"displayModeBar": False})
+    except Exception as _vel_err:
+        st.warning(f"⚠️ Velocity chart could not be rendered: {str(_vel_err)[:80]}")
 
 with int_col:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>INTERVENTION SIMULATION</div>',
@@ -1550,7 +1592,9 @@ with int_col:
                     "monitor_only", ring_summary, transactions, ring_accounts)
 
         out = st.session_state.intervention_out
-        if out:
+        # Guard: intervention_out here is from the alert_engine (dict with total_at_risk)
+        # tab3 stores in intervention_graph_out — these are different namespaces
+        if out and isinstance(out, dict) and "total_at_risk" in out:
             labels = {"freeze_ring":   ("❄️ Full Ring Freeze", "#3b82f6"),
                       "freeze_origin": ("🧊 Origin Freeze",   "#f97316"),
                       "monitor_only":  ("👁 Monitor Only",     "#eab308")}
@@ -1691,14 +1735,34 @@ with ai_right:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>AI INVESTIGATION REPORT</div>',
                 unsafe_allow_html=True)
 
-    if st.button("📋 Generate AI Investigation Report", use_container_width=True):
-        with st.spinner("🔄 Generating AML investigation report…"):
-            summary_json = gemini_layer.build_summary_json(
-                ring_summary, transactions, ring_accounts
-            )
-            report_text = gemini_layer.generate_investigation_report(summary_json)
-            st.session_state.ai_report = report_text
-            st.session_state.ai_report_requested = True
+    # Guard: only show button if intelligence has been completed
+    _report_key_active = bool(gemini_layer._get_api_key())
+    _report_btn_lbl = (
+        "📋 Generate AI Investigation Report"
+        if _report_key_active
+        else "🔒 Gemini API Key Required for Report"
+    )
+    if not st.session_state.ai_report_requested:
+        if st.button(_report_btn_lbl, use_container_width=True,
+                     disabled=not _report_key_active, key="btn_ai_report"):
+            with st.spinner("🔄 Generating AML investigation report…"):
+                summary_json = gemini_layer.build_summary_json(
+                    ring_summary, transactions, ring_accounts
+                )
+                report_text = gemini_layer.generate_investigation_report(summary_json)
+                st.session_state.ai_report = report_text
+                st.session_state.ai_report_requested = True
+            st.rerun()
+    else:
+        if st.button("🔄 Regenerate Investigation Report", use_container_width=True,
+                     key="btn_ai_report_refresh"):
+            with st.spinner("🔄 Regenerating AML investigation report…"):
+                summary_json = gemini_layer.build_summary_json(
+                    ring_summary, transactions, ring_accounts
+                )
+                report_text = gemini_layer.generate_investigation_report(summary_json)
+                st.session_state.ai_report = report_text
+            st.rerun()
 
     if st.session_state.ai_report:
         with st.expander("📄 View Full Investigation Report", expanded=False):
@@ -1832,7 +1896,7 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _qs_dna   = float(pred_df["dna_score"].max()) if (intelligence_mode and not pred_df.empty and "dna_score" in pred_df.columns) else 0.0
-_qs_stage = st.session_state.get("current_stage", "Normal")
+_qs_stage = st.session_state.get("current_stage", "Normal") or "Normal"
 
 if _qs_dna >= 35 or _qs_stage == "Exit Imminent":
     _qs_class, _qs_color, _qs_risk = "Quantum Vulnerable",  "#ef4444", "CRITICAL"
@@ -1903,7 +1967,6 @@ st.markdown("<hr>", unsafe_allow_html=True)
 # IMMUTABLE AUDIT ANCHOR — Blockchain Proof of Detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("<hr>", unsafe_allow_html=True)
 st.markdown("""
 <div class="sec-hdr"><span class="sec-dot"></span>IMMUTABLE AUDIT ANCHOR — BLOCKCHAIN PROOF OF DETECTION</div>
 """, unsafe_allow_html=True)
@@ -1911,9 +1974,9 @@ st.markdown("""
 
 _top_dna_score = float(pred_df["dna_score"].max()) if (intelligence_mode and not pred_df.empty and "dna_score" in pred_df.columns) else 0.0
 
-# Phase 3: always read stage from session_state (set by run_pipeline) — single source of truth
-_top_stage = st.session_state.get("current_stage",
-                ring_summary.get("dominant_label", "Normal"))
+# Always read stage from session_state — single source of truth
+_top_stage = str(st.session_state.get("current_stage") or
+                 ring_summary.get("dominant_label", "Normal"))
 
 # Phase 4: full PQC tier vocabulary — 4 tiers, no truncation
 if _top_dna_score >= 35 or _top_stage == "Exit Imminent":
