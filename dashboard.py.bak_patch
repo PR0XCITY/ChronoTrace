@@ -1011,11 +1011,8 @@ def compute_intelligence():
         analysis = graph_engine.analyse_from_db(result)
         
         # Phase 3: GNN Structural Validation
-        try:
-            gnn_dna_df = gnn_layer.run_gnn_validation(analysis["dna_df"], analysis["graph"])
-            analysis["dna_df"] = gnn_dna_df
-        except Exception as _gnn_err:
-            pass  # GNN validation failed gracefully; DNA data unchanged
+        gnn_dna_df = gnn_layer.run_gnn_validation(analysis["dna_df"], analysis["graph"])
+        analysis["dna_df"] = gnn_dna_df
         
         pred_df  = stage_predictor.predict(analysis["dna_df"])
 
@@ -1096,7 +1093,7 @@ with st.sidebar:
 
     # ── Dataset-backed run (primary for demo / Streamlit Cloud) ────────
     st.caption("🗂️ Dataset-Backed Analysis")
-    if st.button("📊 Load transactions.csv", width="stretch", key="btn_dataset"):
+    if st.button("📊 Load transactions.csv", use_container_width=True, key="btn_dataset"):
         # Invalidate dataset cache so the CSV is re-read and graph rebuilt
         dataset_loader.invalidate_cache()
         run_pipeline(mode="dataset")
@@ -1119,14 +1116,14 @@ with st.sidebar:
         n_rings = st.slider("Mule Rings", 1, 10, 3,
                             help="Number of simultaneous mule rings to inject (1–10)")
 
-    if st.button("▶️  Run Synthetic Simulation", width="stretch"):
+    if st.button("▶️  Run Synthetic Simulation", use_container_width=True):
         run_pipeline(mode, n_rings)
         st.rerun()
 
     if st.session_state.sim_result:
         st.markdown("---")
         # Export JSON
-        if st.button("📥  Export Report", width="stretch"):
+        if st.button("📥  Export Report", use_container_width=True):
             report = {
                 "generated_at":  datetime.now().isoformat(),
                 "mode":          st.session_state.last_mode,
@@ -1145,7 +1142,7 @@ with st.sidebar:
                 data=json.dumps(report, indent=2, default=str),
                 file_name=f"chronotrace_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
-                width="stretch",
+                use_container_width=True,
             )
 
             # Phase 9 — PDF export (HTML print)
@@ -1468,18 +1465,8 @@ with graph_col:
         if pred_df is not None and not pred_df.empty and "node" in pred_df.columns and "stage_label" in pred_df.columns:
             stage_lookup_g = pred_df.set_index("node")["stage_label"].to_dict()
         # GNN + hybrid score lookups for layout sorting and visual glow
-        try:
-            if hasattr(gnn_layer, "get_gnn_scores_dict"):
-                gnn_scores_g    = gnn_layer.get_gnn_scores_dict(dna_df_graph)
-            else:
-                gnn_scores_g    = {}
-            if hasattr(gnn_layer, "get_hybrid_scores_dict"):
-                hybrid_scores_g = gnn_layer.get_hybrid_scores_dict(dna_df_graph)
-            else:
-                hybrid_scores_g = {}
-        except Exception:
-            gnn_scores_g    = {}
-            hybrid_scores_g = {}
+        gnn_scores_g    = gnn_layer.get_gnn_scores_dict(dna_df_graph)
+        hybrid_scores_g = gnn_layer.get_hybrid_scores_dict(dna_df_graph)
     else:
         dna_lookup      = {}
         hop_lookup      = {}
@@ -1551,7 +1538,7 @@ with graph_col:
         with _run_c2:
             if st.button(
                 "🔥 RUN GRAPH INTELLIGENCE ANALYSIS",
-                width="stretch",
+                use_container_width=True,
                 type="primary",
                 key="btn_run_intel_main",
             ):
@@ -1582,7 +1569,7 @@ with graph_col:
                 inr_rate     = INR_RATE,
                 intelligence_mode = False,
             )
-            st.plotly_chart(fig_raw, width="stretch",
+            st.plotly_chart(fig_raw, use_container_width=True,
                             config={"displayModeBar": False}, key="fig_raw")
         else:
             st.info("Load a dataset or run a simulation to view the raw transaction network.")
@@ -1614,7 +1601,7 @@ with graph_col:
                     gnn_scores   = gnn_scores_g,
                     hybrid_scores= hybrid_scores_g,
                 )
-                st.plotly_chart(fig_intel, width="stretch",
+                st.plotly_chart(fig_intel, use_container_width=True,
                                 config={"displayModeBar": False}, key="fig_intel")
             else:
                 st.info("No graph data available for intelligence display.")
@@ -1632,18 +1619,18 @@ with graph_col:
                 st.caption("🛡️ ACTIVE MITIGATION CONTROLS")
                 _btn_ring = st.button(
                     "🔴 FREEZE SUSPICIOUS RING",
-                    width="stretch",
+                    use_container_width=True,
                     help="Tiered freeze: HIGH risk nodes frozen, MEDIUM flagged for KYC.",
                     disabled=_already_frozen,
                 )
                 _btn_origin = st.button(
                     "🟠 ISOLATE ORIGIN ACCOUNT",
-                    width="stretch",
+                    use_container_width=True,
                     help="Apply freeze only to origin node.",
                     disabled=_already_frozen,
                 )
                 if _already_frozen:
-                    if st.button("🔄 Reset Intervention", width="stretch"):
+                    if st.button("🔄 Reset Intervention", use_container_width=True):
                         st.session_state.intervention_graph_out = None
                         st.rerun()
             with _int_col2:
@@ -1748,7 +1735,7 @@ with graph_col:
                         gnn_scores    = gnn_scores_g,
                         hybrid_scores = hybrid_scores_g,
                     )
-                    st.plotly_chart(fig_post, width="stretch",
+                    st.plotly_chart(fig_post, use_container_width=True,
                                     config={"displayModeBar": False}, key="fig_post")
 
                 # Metrics
@@ -1960,7 +1947,7 @@ with dna_col:
                 <div style='height:100%;width:{min(gnn_pct, 100):.1f}%;background:#818cf8;border-radius:2px;'></div>
             </div>
             <div style='font-size:.55rem;color:#334155;margin-top:.4rem;'>
-                {getattr(gnn_layer, 'get_gnn_status', lambda: 'GNN Structural Mode')()}
+                {gnn_layer.get_gnn_status()}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1995,7 +1982,7 @@ with gauge_col:
     ))
     fig_g2.update_layout(paper_bgcolor="#050810", font_color="#e2e8f0",
                          height=210, margin=dict(l=15, r=15, t=15, b=5))
-    st.plotly_chart(fig_g2, width="stretch", config={"displayModeBar": False})
+    st.plotly_chart(fig_g2, use_container_width=True, config={"displayModeBar": False})
     rl = ("🔴 CRITICAL THREAT" if rs >= 70 else "🟠 HIGH RISK" if rs >= 50
           else "🟡 MODERATE" if rs >= 30 else "🟢 LOW RISK")
     st.markdown(f"""<div style='text-align:center;font-size:.76rem;font-weight:700;
@@ -2079,7 +2066,7 @@ with vel_col:
             hovermode="x unified",
             hoverlabel=dict(bgcolor="#0d1520", font_size=10),
         )
-        st.plotly_chart(fv, width="stretch", config={"displayModeBar": False})
+        st.plotly_chart(fv, use_container_width=True, config={"displayModeBar": False})
     except Exception as _vel_err:
         st.warning(f"⚠️ Velocity chart could not be rendered: {str(_vel_err)[:80]}")
 
@@ -2089,17 +2076,17 @@ with int_col:
     if is_attack:
         ca, cb, cc = st.columns(3)
         with ca:
-            if st.button("🧊 Freeze\nOrigin", width="stretch"):
+            if st.button("🧊 Freeze\nOrigin", use_container_width=True):
                 st.session_state.intervention = "freeze_origin"
                 st.session_state.intervention_out = alert_engine.compute_intervention_outcome(
                     "freeze_origin", ring_summary, transactions, ring_accounts)
         with cb:
-            if st.button("❄️ Freeze\nRing", width="stretch"):
+            if st.button("❄️ Freeze\nRing", use_container_width=True):
                 st.session_state.intervention = "freeze_ring"
                 st.session_state.intervention_out = alert_engine.compute_intervention_outcome(
                     "freeze_ring", ring_summary, transactions, ring_accounts)
         with cc:
-            if st.button("👁 Monitor\nOnly", width="stretch"):
+            if st.button("👁 Monitor\nOnly", use_container_width=True):
                 st.session_state.intervention = "monitor_only"
                 st.session_state.intervention_out = alert_engine.compute_intervention_outcome(
                     "monitor_only", ring_summary, transactions, ring_accounts)
@@ -2166,7 +2153,7 @@ with ai_left:
             if key_active
             else "🔒 Gemini API Key Required"
         )
-        if st.button(btn_label, width="stretch", disabled=not key_active,
+        if st.button(btn_label, use_container_width=True, disabled=not key_active,
                      key="btn_ai_analysis"):
             with st.spinner("� Calling Gemini 2.5 Flash…"):
                 metrics = st.session_state.get("ai_metrics_json") or \
@@ -2178,7 +2165,7 @@ with ai_left:
                 st.session_state.ai_intel_requested = True
             st.rerun()
     else:
-        if st.button("🔄 Refresh AI Analysis", width="stretch",
+        if st.button("🔄 Refresh AI Analysis", use_container_width=True,
                      key="btn_ai_refresh"):
             with st.spinner("🔄 Refreshing Gemini analysis…"):
                 metrics = st.session_state.get("ai_metrics_json") or \
@@ -2249,7 +2236,7 @@ with ai_right:
     st.markdown('<div class="sec-hdr"><span class="sec-dot"></span>AI INVESTIGATION REPORT</div>',
                 unsafe_allow_html=True)
 
-    if st.button("📋 Generate AI Investigation Report", width="stretch"):
+    if st.button("📋 Generate AI Investigation Report", use_container_width=True):
         with st.spinner("🔄 Generating AML investigation report…"):
             summary_json = gemini_layer.build_summary_json(
                 ring_summary, transactions, ring_accounts
@@ -2537,7 +2524,7 @@ with _anch_left:
         if eligible:
             if st.button(
                 "⛓️  Anchor to Ethereum Sepolia",
-                width="stretch",
+                use_container_width=True,
                 key="btn_anchor",
             ):
                 top_alert = all_alerts[0] if all_alerts else {}
